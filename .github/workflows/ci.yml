@@ -23,7 +23,7 @@ jobs:
         run: dotnet build TBMini.csproj -c Release -nologo
 
       - name: Upload build
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: TBMini-${{ github.sha }}
           path: |
