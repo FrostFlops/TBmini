@@ -26,6 +26,13 @@ namespace TBMini
         };
     }
 
+    /// Thrown by Feature.Read when the feature exists but cannot be used in the current state (the row is shown
+    /// disabled with the message as its tooltip), e.g. 超级分辨率 while the dGPU drives the display.
+    public sealed class UnavailableException : Exception
+    {
+        public UnavailableException(string reason) : base(reason) { }
+    }
+
     /// One setting row in the panel. Read/Write run on a background thread.
     /// Read() returns the option index (Toggle: 0 = off, 1 = on), -1 = unknown;
     /// it throws NotSupportedException when the feature does not exist on this machine (row is hidden).
@@ -303,6 +310,15 @@ namespace TBMini
                 Tip = T("内屏出厂 X-Rite 校色预设（开了 HDR / 自动颜色管理时不生效）。切换显卡模式后会自动重新应用",
                         "Factory X-Rite presets for the internal display (no effect with HDR or Auto color management on). Re-applied automatically after a GPU mode switch"),
                 ReadFn = ColorPreset.Read, WriteFn = ColorPreset.Write,
+            });
+
+            L.Add(new DelegateFeature
+            {
+                Id = "sr", Section = Sec.Display, Label = T("超级分辨率", "Super resolution"),
+                Tip = T("Intel 核显的视频超分辨率：放大低分辨率视频时更清晰。只对核显播放的视频生效（混合 / 集显模式）",
+                        "Intel iGPU video super resolution: sharper upscaling of low-resolution video. Only affects video played on the iGPU (Hybrid / iGPU only)"),
+                ReadFn = IntelSr.Read,
+                WriteFn = v => { IntelSr.Write(v); Check(IntelSr.Read() == v, T("超级分辨率", "Super resolution")); },
             });
 
             L.Add(new DelegateFeature

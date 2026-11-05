@@ -18,6 +18,7 @@ namespace TBMini
         public bool? Supported;      // null = not read yet
         public int Value = -1;
         public bool Busy;
+        public string Unavailable;   // non-null: exists but not usable now (row disabled, this is the tooltip)
     }
 
     // ===================================================================================== theme
@@ -92,7 +93,9 @@ namespace TBMini
         static readonly GpuMode[] GpuModes = { GpuMode.Hybrid, GpuMode.IgpuOnly, GpuMode.Discrete };
         static readonly string[] GpuGlyphs = { Glyph.Hybrid, Glyph.Chip, Glyph.Monitor };
         static readonly Color[] GpuColors = { Color.FromArgb(0x3B, 0x82, 0xF6), Color.FromArgb(0x14, 0xB8, 0xA6), Color.FromArgb(0x76, 0xB9, 0x00) };
+        // Body bands, top to bottom: left[i] and right[i] end on the same line (band 0 also holds the mode tiles).
         static readonly string[] LeftSections = { Sec.Battery, Sec.Power, Sec.App };
+        static readonly string[] RightSections = { Sec.Keyboard, Sec.Display, Sec.Sound };
 
         readonly TrayApp _app;
         readonly float _s;
@@ -107,7 +110,7 @@ namespace TBMini
         bool _sensing;
         readonly Timer _anim = new Timer { Interval = 10 };   // pop-up: short slide + fade
         int _animFrom, _animTo, _animStart;
-        const int AnimMs = 170;
+        const int AnimMs = 280, AnimRise = 40;
         IntPtr _powerNotify;
         readonly Label _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
@@ -127,6 +130,7 @@ namespace TBMini
             public Label Label;
             public Control Ctl;          // Toggle / Segmented / Drop
             public bool Shown;           // own flag: Control.Visible reads false while the form is hidden
+            public string TipNow;        // tooltip currently set on the row
         }
 
         int S(float v) => (int)Math.Round(v * _s);
@@ -435,6 +439,7 @@ namespace TBMini
         {
             var card = _sections[r.F.Section].card;
             if (r.Ctl != null) { _tip.SetToolTip(r.Ctl, null); card.Controls.Remove(r.Ctl); r.Ctl.Dispose(); }
+            r.TipNow = null;                 // the next UpdateView sets the right tooltip on the new control
             var f = r.F;
             if (f.Kind == FeatureKind.Toggle)
             {
@@ -498,54 +503,25 @@ namespace TBMini
             LayoutHeader();
             int top = HeaderY + S(HeaderH) + S(16);
 
-            // left column: modes
-            int yL = top;
-            var colL = new List<(Control label, Control card)> { (_secPerf, _cardPerf), (_secGpu, _cardGpu) };
-            var colR = new List<(Control label, Control card)>();
-            yL = PlaceTiles(_secPerf, _cardPerf, _pt, x0, yL, colW);
-            yL = PlaceTiles(_secGpu, _cardGpu, _gt, x0, yL, colW);
-            int yR = top;
-
-            // feature sections (registry order), left/right columns
-            foreach (var section in FeatureRegistry.All.Select(f => f.Section).Distinct())
+            // Body: three bands, each pairing a left and a right block that end on the same line:
+            //   性能 + 显卡 + 电池 | 键盘,   电源 | 显示,   应用 | 声音
+            foreach (var (label, card) in _sections.Values) { label.Visible = card.Visible = false; }
+            int y = top, bottom = top;
+            for (int band = 0; band < LeftSections.Length; band++)
             {
-                if (!_sections.TryGetValue(section, out var sec)) continue;
-                var rows = FeatureRegistry.All.Where(f => f.Section == section && _rows.ContainsKey(f.Id)).Select(f => _rows[f.Id]).ToList();
-                foreach (var r in rows)
-                {
-                    r.Shown = _app.FeatureStateOf(r.F).Supported == true;
-                    r.Label.Visible = r.Shown; r.Ctl.Visible = r.Shown;
-                }
-                var shown = rows.Where(r => r.Shown).ToList();
-                bool left = LeftSections.Contains(section);
-                sec.label.Visible = sec.card.Visible = shown.Count > 0;
-                if (shown.Count == 0) continue;
-                int x = left ? x0 : x1;
-                int y = left ? yL : yR;
-                sec.label.Location = new Point(x + S(2), y);
-                y += S(24);
-                int rowH = S(RowH), inX = S(14);
-                sec.card.Bounds = new Rectangle(x, y, colW, shown.Count * rowH);
-                var dividers = new List<int>();
-                for (int i = 0; i < shown.Count; i++)
-                {
-                    var r = shown[i];
-                    int ry = i * rowH;
-                    if (i > 0) dividers.Add(ry);
-                    Size cs = r.Ctl is Toggle ? new Size(S(40), S(20)) : new Size(S(200), S(28));
-                    if (r.Ctl is Segmented sg && sg.Options.Length <= 2) cs.Width = S(150);
-                    r.Ctl.Bounds = new Rectangle(colW - inX - cs.Width, ry + (rowH - cs.Height) / 2, cs.Width, cs.Height);
-                    r.Label.Bounds = new Rectangle(inX, ry + 1, r.Ctl.Left - inX - S(8), rowH - 2);   // keep dividers visible
-                }
-                sec.card.Dividers = dividers.ToArray();
-                sec.card.Invalidate();
-                (left ? colL : colR).Add((sec.label, sec.card));
-                y = sec.card.Bottom + S(14);
-                if (left) yL = y; else yR = y;
+                var left = new List<Block>();
+                if (band == 0) { left.Add(TileBlock(_secPerf, _cardPerf, _pt)); left.Add(TileBlock(_secGpu, _cardGpu, _gt)); }
+                var lb = SectionBlock(LeftSections[band]); if (lb != null) left.Add(lb);
+                var right = new List<Block>();
+                var rb = SectionBlock(RightSections[band]); if (rb != null) right.Add(rb);
+                if (left.Count + right.Count == 0) continue;
+                int bandH = Math.Max(ColumnHeight(left), ColumnHeight(right));
+                PlaceColumn(left, x0, y, bandH, colW);
+                PlaceColumn(right, x1, y, bandH, colW);
+                bottom = y + bandH;
+                y = bottom + S(14);
             }
-
-            AlignLastSections(colL, colR);
-            int bottom = colL.Concat(colR).Select(c => c.card.Bottom).DefaultIfEmpty(top).Max() + S(14);
+            bottom += S(14);
             _status.Bounds = new Rectangle(x0 + S(2), bottom - S(4), Width - 2 * pad, S(22));
             int h = _status.Bottom + S(10);
 
@@ -565,21 +541,75 @@ namespace TBMini
             Invalidate();
         }
 
-        /// The last section of each column starts on the same line (e.g. 应用 and 声音, both two rows), so the
-        /// columns also end together; the shorter column's extra space is spread evenly over its section gaps.
-        static void AlignLastSections(List<(Control label, Control card)> a, List<(Control label, Control card)> b)
+        /// One titled card in a column: either mode tiles or a feature section with visible rows.
+        sealed class Block
         {
-            if (a.Count < 2 || b.Count < 2) return;
-            int ta = a[a.Count - 1].label.Top, tb = b[b.Count - 1].label.Top;
-            if (ta == tb) return;
-            var shorter = ta < tb ? a : b;
-            int extra = Math.Abs(ta - tb), n = shorter.Count - 1;
-            for (int i = 1; i <= n; i++)
+            public Label Title; public Card Card;
+            public Tile[] Tiles;               // tile block
+            public List<Row> Rows;             // feature section block
+            public int CardH;                  // natural card height
+        }
+
+        Block TileBlock(Label title, Card card, Tile[] tiles) =>
+            new Block { Title = title, Card = card, Tiles = tiles, CardH = S(TileH) + 2 * S(8) };
+
+        /// The section's visible rows, or null when none is supported.
+        Block SectionBlock(string section)
+        {
+            if (!_sections.TryGetValue(section, out var sec)) return null;
+            var rows = FeatureRegistry.All.Where(f => f.Section == section && _rows.ContainsKey(f.Id)).Select(f => _rows[f.Id]).ToList();
+            foreach (var r in rows)
             {
-                int dy = extra * i / n;
-                shorter[i].label.Top += dy;
-                shorter[i].card.Top += dy;
+                r.Shown = _app.FeatureStateOf(r.F).Supported == true;
+                r.Label.Visible = r.Shown; r.Ctl.Visible = r.Shown;
             }
+            var shown = rows.Where(r => r.Shown).ToList();
+            if (shown.Count == 0) return null;
+            return new Block { Title = sec.label, Card = sec.card, Rows = shown, CardH = shown.Count * S(RowH) };
+        }
+
+        int ColumnHeight(List<Block> blocks) =>
+            blocks.Count == 0 ? 0 : blocks.Sum(b => S(24) + b.CardH) + S(14) * (blocks.Count - 1);
+
+        /// Places a column's blocks from y so that the last one ends at y + bandH: extra height goes into the gaps
+        /// between blocks, or, for a single feature section, into slightly taller rows (at most +50 %).
+        void PlaceColumn(List<Block> blocks, int x, int y, int bandH, int colW)
+        {
+            if (blocks.Count == 0) return;
+            int extra = bandH - ColumnHeight(blocks);
+            int stretch = blocks.Count == 1 && blocks[0].Rows != null
+                ? Math.Min(extra, blocks[0].Rows.Count * S(RowH) / 2) : 0;
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                var b = blocks[i];
+                if (i > 0 && blocks.Count > 1) y += extra / (blocks.Count - 1) + (i == blocks.Count - 1 ? extra % (blocks.Count - 1) : 0);
+                b.Title.Location = new Point(x + S(2), y);
+                b.Title.Visible = true;
+                int cardY = y + S(24);
+                if (b.Tiles != null) PlaceTiles(b.Card, b.Tiles, x, cardY, colW);
+                else PlaceRows(b, x, cardY, colW, b.CardH + stretch);
+                b.Card.Visible = true;
+                y = b.Card.Bottom + S(14);
+            }
+        }
+
+        void PlaceRows(Block b, int x, int y, int colW, int cardH)
+        {
+            int n = b.Rows.Count, inX = S(14);
+            b.Card.Bounds = new Rectangle(x, y, colW, cardH);
+            var dividers = new List<int>();
+            for (int i = 0; i < n; i++)
+            {
+                var r = b.Rows[i];
+                int ry = (int)Math.Round((double)i * cardH / n), rh = (int)Math.Round((double)(i + 1) * cardH / n) - ry;
+                if (i > 0) dividers.Add(ry);
+                Size cs = r.Ctl is Toggle ? new Size(S(40), S(20)) : new Size(S(200), S(28));
+                if (r.Ctl is Segmented sg && sg.Options.Length <= 2) cs.Width = S(150);
+                r.Ctl.Bounds = new Rectangle(colW - inX - cs.Width, ry + (rh - cs.Height) / 2, cs.Width, cs.Height);
+                r.Label.Bounds = new Rectangle(inX, ry + 1, r.Ctl.Left - inX - S(8), rh - 2);   // keep dividers visible
+            }
+            b.Card.Dividers = dividers.ToArray();
+            b.Card.Invalidate();
         }
 
         const int HeaderH = 26;
@@ -622,15 +652,12 @@ namespace TBMini
             _hTitle.Location = new Point(pad - S(1), cy + (h - _hTitle.PreferredSize.Height) / 2);
         }
 
-        int PlaceTiles(Label sec, Card card, Tile[] tiles, int x, int y, int w)
+        void PlaceTiles(Card card, Tile[] tiles, int x, int y, int w)
         {
-            sec.Location = new Point(x + S(2), y);
-            y += S(24);
             int inset = S(8), gap = S(6), n = tiles.Length;
             card.Bounds = new Rectangle(x, y, w, S(TileH) + 2 * inset);
             int tw = (w - 2 * inset - (n - 1) * gap) / n;
             for (int i = 0; i < n; i++) tiles[i].Bounds = new Rectangle(inset + i * (tw + gap), inset, tw, S(TileH));
-            return card.Bottom + S(14);
         }
 
         // ------------------------------------------------------------------ theme
@@ -708,12 +735,17 @@ namespace TBMini
                 if (f.Kind == FeatureKind.Choice && (wantSeg != (r.Ctl is Segmented) || (r.Ctl is Segmented sg0 && sg0.Options.Length != f.Options.Length)))
                 { BuildControl(r); ApplyTheme(); layout = true; }
 
+                bool usable = !st.Busy && st.Unavailable == null;
                 switch (r.Ctl)
                 {
-                    case Toggle t: t.On = st.Value == 1; t.Unknown = st.Value < 0; t.Enabled = !st.Busy; break;
-                    case Segmented sg: sg.Selected = st.Value; sg.Enabled = !st.Busy; break;
-                    case Drop d: d.Text = st.Value >= 0 && st.Value < f.Options.Length ? f.Options[st.Value] : "—"; d.Enabled = !st.Busy; break;
+                    case Toggle t: t.On = st.Value == 1; t.Unknown = st.Value < 0; t.Enabled = usable; break;
+                    case Segmented sg: sg.Selected = st.Value; sg.Enabled = usable; break;
+                    case Drop d: d.Text = st.Value >= 0 && st.Value < f.Options.Length ? f.Options[st.Value] : "—"; d.Enabled = usable; break;
                 }
+                // exists but unusable right now (e.g. 超级分辨率 in dGPU direct): greyed out, the reason as tooltip
+                r.Label.ForeColor = st.Unavailable != null ? _t.Disabled : _t.Fg;
+                string tip = st.Unavailable ?? f.Tip;
+                if (tip != r.TipNow) { r.TipNow = tip; _tip.SetToolTip(r.Label, tip); _tip.SetToolTip(r.Ctl, tip); }
                 r.Ctl.Invalidate();
             }
             if (layout) Relayout();
@@ -754,7 +786,7 @@ namespace TBMini
             if (AnimationsEnabled())
             {   // rise from the taskbar side and fade in, like the Windows 11 flyouts
                 _animTo = y;
-                _animFrom = y + (_anchorBottom ? S(16) : -S(16));
+                _animFrom = y + (_anchorBottom ? S(AnimRise) : -S(AnimRise));
                 Opacity = 0;
                 Location = new Point(x, _animFrom);
                 _animStart = Environment.TickCount;
@@ -769,10 +801,10 @@ namespace TBMini
         void AnimStep()
         {
             double t = Math.Min(1.0, (Environment.TickCount - _animStart) / (double)AnimMs);
-            double e = 1 - Math.Pow(1 - t, 3);                      // ease-out cubic
+            double e = 1 - Math.Pow(1 - t, 3);                      // position: ease-out cubic
             Top = (int)Math.Round(_animFrom + (_animTo - _animFrom) * e);
             if (t >= 1) { _anim.Stop(); Top = _animTo; Opacity = 1; }   // back to a normal (non-layered) window
-            else Opacity = Math.Max(0.01, e);
+            else Opacity = Math.Max(0.01, 1 - (1 - t) * (1 - t));   // fade: ease-out quadratic, spans the whole rise
         }
 
         /// Honours "Animation effects" in Windows settings (SPI_GETCLIENTAREAANIMATION).
@@ -1054,8 +1086,8 @@ namespace TBMini
             {
                 var vf = ValueFont ?? Font;
                 int w = S(8) + S(14) + S(5);
-                if (ShowLabel && Label != "") w += Measure(Label, Font) + S(8);
-                if (ReserveTemp) w += Measure("88°C", vf) + S(5);
+                if (ShowLabel && Label != "") w += Measure(Label, Font);
+                w += ReserveTemp ? S(10) + Measure("88°C", vf) + S(10) : S(8);   // the temperature sits centred between label and power
                 int vw = Measure(Value, vf);
                 foreach (var t in Templates) vw = Math.Max(vw, Measure(t, vf));
                 return w + vw + S(10);
@@ -1084,16 +1116,24 @@ namespace TBMini
             Fill(g, r, r.Height / 2f, T.Card);
             Stroke(g, r, r.Height / 2f, T.CardBorder);
             DrawGlyph(g, Glyph, 13, new Rectangle(S(7), 0, S(16), Height), T.Accent);
+            int labelEnd = S(27);
             if (ShowLabel && Label != "")
+            {
                 TextRenderer.DrawText(g, Label, Font, new Rectangle(S(27), 0, Width, Height), T.Sub, F | TextFormatFlags.Left);
+                labelEnd += TextRenderer.MeasureText(g, Label, Font, Size.Empty, F).Width;
+            }
             var vf = ValueFont ?? Font;
             int right = Width - S(10);
             int vw = TextRenderer.MeasureText(g, Value, vf, Size.Empty, F).Width;
             TextRenderer.DrawText(g, Value, vf, new Rectangle(right - vw, 0, vw + S(2), Height), Muted ? T.Sub : T.Fg, F | TextFormatFlags.Left);
             if (Temp != "")
             {
+                // centred in the space between the label and the power value, so the two numbers read separately
                 int tw = TextRenderer.MeasureText(g, Temp, vf, Size.Empty, F).Width;
-                TextRenderer.DrawText(g, Temp, vf, new Rectangle(right - vw - S(5) - tw, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
+                int valueStart = right - Math.Max(vw, Templates.Max(t => TextRenderer.MeasureText(g, t, vf, Size.Empty, F).Width));
+                int tx = (labelEnd + valueStart - tw) / 2;
+                tx = Math.Max(labelEnd + S(6), Math.Min(tx, right - vw - S(6) - tw));
+                TextRenderer.DrawText(g, Temp, vf, new Rectangle(tx, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
             }
         }
     }

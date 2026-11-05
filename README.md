@@ -21,7 +21,7 @@ Lenovo's background services and drivers must stay installed: TBMini only replac
 | Battery | Charge mode (Normal / Rapid / Conserve), night charging |
 | Power | Always-on USB (Off / On / + battery), power on when the lid opens |
 | Keyboard | Backlight (Off / Low / High / Auto), backlight off after 30 s, remember backlight, top-row keys (hotkeys / F1-F12), Fn/Ctrl swap, Caps Lock / Num Lock indicators, touchpad on/off |
-| Display | Factory X-Rite color presets for the internal display (D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709), re-applied automatically after a GPU mode switch |
+| Display | Factory X-Rite color presets for the internal display (D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709), re-applied automatically after a GPU mode switch; Intel video super resolution (超级分辨率; only while the iGPU drives the display, so it is greyed out in dGPU direct) |
 | Sound | Dolby Audio (Dynamic / Movie / Music / Game / Voice / Custom / Off), AI mic noise suppression (Off / Group / Single / Spatial) |
 | App | Language (System / 中文 / English), start at sign-in |
 
@@ -83,6 +83,7 @@ TBMini ships no Lenovo or NVIDIA files. It calls components that are already ins
 - dGPU temperature and power: the NVIDIA driver's `nvml.dll`; CPU power: the Energy Meter counters built into Windows; battery discharge: the Windows battery driver
 - CPU temperature (optional): the [PawnIO](https://pawnio.eu) driver, if you install it. TBMini embeds PawnIO's official signed `IntelMSR` module, which can only read a fixed list of CPU registers (LGPL-2.1, see [third_party/PawnIO](third_party/PawnIO)), and loads PawnIO's library only after checking its signature
 - Caps Lock / Num Lock indicators: the `LenovoFnAndFunctionKeys` service
+- Super resolution: the Intel Graphics Control Library (`ControlLib.dll`, installed with the Intel graphics driver), the same call Lenovo's own super resolution switch makes
 - Color presets: the factory X-Rite profiles (`C:\Windows\System32\spool\drivers\color\TPLCD_*.icm`). They have no effect while HDR or "Automatically manage color for apps" is on
 - Dolby Audio: the Dolby audio driver and service, plus `DolbyRpcClient.dll` from Lenovo Baiying (copied to the install folder when Start at sign-in is turned on)
 - Mic noise suppression: Lenovo Vantage's noise-suppression plugin. Before loading it, TBMini checks its signature with WinVerifyTrust and confirms that Lenovo signed it

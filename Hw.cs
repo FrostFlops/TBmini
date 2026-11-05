@@ -588,6 +588,125 @@ namespace TBMini
     }
 
     // =============================================================================================
+    // 超级分辨率 = Intel video super resolution on the iGPU, set through the Intel Graphics Control Library
+    // (System32\ControlLib.dll, installed with the Intel graphics driver) — the same call Lenovo's
+    // SESuperResolutionPlugin makes. Struct layouts follow igcl_api.h (natural alignment, x64).
+    // =============================================================================================
+    public static class IntelSr
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct InitArgs { public uint Size; public byte Version; public uint AppVersion, Flags, SupportedVersion; public Guid AppUid; }
+
+        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        static extern int ctlInit(ref InitArgs args, out IntPtr api);
+        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        static extern int ctlClose(IntPtr api);
+        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        static extern int ctlEnumerateDevices(IntPtr api, ref uint count, IntPtr[] devices);
+        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        static extern int ctlGetSetVideoProcessingFeature(IntPtr device, IntPtr feature);
+
+        const int FEATURE_SIZE = 120, SR_SIZE = 92;                    // ctl_video_processing_feature_getset_t, ..._super_resolution_t
+        const int FEATURE_SUPER_RESOLUTION = 4, VALUE_TYPE_CUSTOM = 5;
+        const uint FLAG_DISABLE = 0x1, FLAG_ENABLE_DEFAULT = 0x2, FLAG_ENABLE_ANY = 0x2 | 0x4 | 0x8;
+        static readonly Guid AppId = Guid.Empty;                        // all zeros = default ID (others need registration)
+        static bool _missing;
+
+        /// 0 = off, 1 = on. The driver only offers super resolution while the iGPU drives the display, so in
+        /// dGPU direct mode this throws UnavailableException; without an Intel GPU / support, NotSupportedException.
+        public static int Read()
+        {
+            uint flag = 0; bool adapter = false;
+            if (WithDevice(dev => { adapter = true; return Get(dev, out flag) == 0; }))
+                return (flag & FLAG_ENABLE_ANY) != 0 && (flag & FLAG_DISABLE) == 0 ? 1 : 0;
+            if (adapter && Gpu.InternalPanelOnDgpu() == true)
+                throw new UnavailableException(T("独显直连时不可用：只在内屏由核显驱动（混合 / 集显模式）时可用",
+                                                 "Not available in dGPU direct mode: only while the iGPU drives the display (Hybrid / iGPU only)"));
+            throw new NotSupportedException("Intel super resolution");
+        }
+
+        public static void Write(int on)
+        {
+            uint want = on == 1 ? FLAG_ENABLE_DEFAULT : FLAG_DISABLE;
+            int rc = -1;
+            if (!WithDevice(dev => Get(dev, out _) == 0 && (rc = Set(dev, want)) == 0))
+                throw new InvalidOperationException(T("超级分辨率设置失败", "Super resolution could not be set") + (rc != -1 ? $" (0x{rc:X})" : ""));
+        }
+
+        /// Runs fn on each Intel adapter until it returns true.
+        static bool WithDevice(Func<IntPtr, bool> fn)
+        {
+            if (_missing) return false;
+            IntPtr api = IntPtr.Zero;
+            try
+            {
+                var args = new InitArgs { Size = (uint)Marshal.SizeOf<InitArgs>(), AppVersion = (1u << 16) | 1u, AppUid = AppId };
+                if (ctlInit(ref args, out api) != 0 || api == IntPtr.Zero) return false;
+                uint n = 0;
+                if (ctlEnumerateDevices(api, ref n, null) != 0 || n == 0) return false;
+                var devs = new IntPtr[n];
+                if (ctlEnumerateDevices(api, ref n, devs) != 0) return false;
+                foreach (var d in devs) if (d != IntPtr.Zero && fn(d)) return true;
+                return false;
+            }
+            catch (DllNotFoundException) { _missing = true; return false; }
+            catch (EntryPointNotFoundException) { _missing = true; return false; }
+            finally { if (api != IntPtr.Zero) ctlClose(api); }
+        }
+
+        /// One ctlGetSetVideoProcessingFeature call for super resolution with the custom struct at v.
+        static int Call(IntPtr dev, bool set, IntPtr v)
+        {
+            IntPtr f = Marshal.AllocHGlobal(FEATURE_SIZE);
+            try
+            {
+                Zero(f, FEATURE_SIZE);
+                Marshal.WriteInt32(f, 0, FEATURE_SIZE);                 // Size (Version 0 at +4)
+                Marshal.WriteInt32(f, 8, FEATURE_SUPER_RESOLUTION);     // FeatureType
+                Marshal.WriteByte(f, 25, (byte)(set ? 1 : 0));          // bSet (ApplicationName NULL = global setting)
+                Marshal.WriteInt32(f, 28, VALUE_TYPE_CUSTOM);           // ValueType
+                Marshal.WriteInt32(f, 40, SR_SIZE);                     // CustomValueSize
+                Marshal.WriteIntPtr(f, 48, v);                          // pCustomValue
+                return ctlGetSetVideoProcessingFeature(dev, f);
+            }
+            finally { Marshal.FreeHGlobal(f); }
+        }
+
+        static int Get(IntPtr dev, out uint flag)
+        {
+            IntPtr v = Marshal.AllocHGlobal(SR_SIZE);
+            try
+            {
+                Zero(v, SR_SIZE);
+                Marshal.WriteInt32(v, 0, SR_SIZE);                      // Size (Version 0 at +4)
+                int rc = Call(dev, false, v);
+                flag = (uint)Marshal.ReadInt32(v, 8);                   // super_resolution_flag
+                return rc;
+            }
+            finally { Marshal.FreeHGlobal(v); }
+        }
+
+        /// Reads the driver's current values first and writes them back with only the flag changed.
+        static int Set(IntPtr dev, uint flag)
+        {
+            IntPtr v = Marshal.AllocHGlobal(SR_SIZE);
+            try
+            {
+                Zero(v, SR_SIZE);
+                Marshal.WriteInt32(v, 0, SR_SIZE);
+                int rc = Call(dev, false, v);
+                if (rc != 0) return rc;
+                Marshal.WriteInt32(v, 0, SR_SIZE);
+                Marshal.WriteInt32(v, 8, (int)flag);
+                return Call(dev, true, v);
+            }
+            finally { Marshal.FreeHGlobal(v); }
+        }
+
+        static void Zero(IntPtr p, int n) { for (int i = 0; i < n; i += 4) Marshal.WriteInt32(p, i, 0); }
+    }
+
+    // =============================================================================================
     // Authenticode check for third-party DLLs TBMini loads while elevated
     // =============================================================================================
     public static class Trust
