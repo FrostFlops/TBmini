@@ -6,6 +6,7 @@ using System.ServiceProcess;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using static TBMini.L10n;
 
 namespace TBMini
 {
@@ -68,11 +69,11 @@ namespace TBMini
 
         public static string Name(PowerMode m) => m switch
         {
-            PowerMode.Auto => "智能",
-            PowerMode.Saver => "省电",
-            PowerMode.Performance => "性能",
-            PowerMode.Geek => "极客",
-            _ => "未知",
+            PowerMode.Auto => T("智能", "Auto"),
+            PowerMode.Saver => T("省电", "Saver"),
+            PowerMode.Performance => T("性能", "Performance"),
+            PowerMode.Geek => T("极客", "Geek"),
+            _ => T("未知", "Unknown"),
         };
 
         public static void Set(PowerMode m)
@@ -85,12 +86,12 @@ namespace TBMini
                 PowerMode.Geek => 0xAC,
                 _ => throw new ArgumentOutOfRangeException(nameof(m)),
             };
-            if (m == PowerMode.Geek && !GeekAvailable) throw new InvalidOperationException("极客模式只能在接电源时使用");
+            if (m == PowerMode.Geek && !GeekAvailable) throw new InvalidOperationException(T("极客模式只能在接电源时使用", "Geek mode is only available on AC power"));
 
             using (var sc = new ServiceController(ServiceName))
             {
                 if (sc.Status != ServiceControllerStatus.Running)
-                    throw new InvalidOperationException("联想服务 LenovoProcessManagement 没有运行");
+                    throw new InvalidOperationException(T("联想服务 LenovoProcessManagement 没有运行", "The Lenovo service LenovoProcessManagement is not running"));
                 sc.ExecuteCommand(code);
             }
             for (int i = 0; i < 15; i++)
@@ -98,7 +99,7 @@ namespace TBMini
                 Thread.Sleep(200);
                 if (Read() == m) return;
             }
-            throw new System.TimeoutException($"命令已发送，但模式没有变成「{Name(m)}」（现在是「{Name(Read())}」）");
+            throw new System.TimeoutException(T($"命令已发送，但模式没有变成「{Name(m)}」（现在是「{Name(Read())}」）", $"Command sent, but the mode did not change to {Name(m)} (it is {Name(Read())})"));
         }
     }
 
@@ -140,7 +141,7 @@ namespace TBMini
 
         static ManagementBaseObject Call(string cls, string method, Action<ManagementBaseObject> fill = null)
         {
-            using var o = First(cls) ?? throw new NotSupportedException(cls + " 不存在");
+            using var o = First(cls) ?? throw new NotSupportedException(cls + T(" 不存在", " not found"));
             ManagementBaseObject inp = null;
             if (fill != null) { inp = o.GetMethodParameters(method); fill(inp); }
             return o.InvokeMethod(method, inp, null);
@@ -171,12 +172,12 @@ namespace TBMini
 
         public static string Name(GpuMode g) => g switch
         {
-            GpuMode.Hybrid => "混合",
-            GpuMode.IgpuOnly => "集显",
-            GpuMode.Auto => "自动",
-            GpuMode.Discrete => "独显直连",
-            GpuMode.Uma => "纯集显(BIOS)",
-            _ => "未知",
+            GpuMode.Hybrid => T("混合", "Hybrid"),
+            GpuMode.IgpuOnly => T("集显", "iGPU only"),
+            GpuMode.Auto => T("自动", "Auto"),
+            GpuMode.Discrete => T("独显直连", "dGPU direct"),
+            GpuMode.Uma => T("纯集显(BIOS)", "UMA (BIOS)"),
+            _ => T("未知", "Unknown"),
         };
 
         public static GpuMode SubMode(int igpu) => igpu switch
@@ -299,7 +300,7 @@ namespace TBMini
                     fill(inp);
                     return o.InvokeMethod(method, inp, null);
                 }
-            throw new NotSupportedException(cls + " 不存在");
+            throw new NotSupportedException(cls + T(" 不存在", " not found"));
         }
 
         /// Current value of a BIOS item (e.g. "FlipToStart" -> "Disable"), null if the item does not exist.
@@ -337,14 +338,14 @@ namespace TBMini
         {
             lock (Gate)
             {
-                if (SupervisorPasswordSet()) throw new InvalidOperationException("BIOS 设有管理员密码，请到 BIOS 设置里修改");
+                if (SupervisorPasswordSet()) throw new InvalidOperationException(T("BIOS 设有管理员密码，请到 BIOS 设置里修改", "A BIOS supervisor password is set; change this in BIOS setup"));
                 var sel = Selections(item);
                 if (sel.Length > 0 && !sel.Any(x => Gpu.Eq(x, value)))
-                    throw new InvalidOperationException($"BIOS 项 {item} 不支持「{value}」（可选：{string.Join(" / ", sel)}）");
+                    throw new InvalidOperationException(T($"BIOS 项 {item} 不支持「{value}」（可选：{string.Join(" / ", sel)}）", $"BIOS item {item} does not accept \"{value}\" (choices: {string.Join(" / ", sel)})"));
 
                 var r = Call("Lenovo_SetBiosSetting", "SetBiosSetting", p => p["parameter"] = item + "," + value + ";");
                 string ret = r["return"] as string;
-                if (!Gpu.Eq(ret, "Success")) throw new InvalidOperationException($"SetBiosSetting({item}) 返回：{ret}");
+                if (!Gpu.Eq(ret, "Success")) throw new InvalidOperationException(T($"SetBiosSetting({item}) 返回：{ret}", $"SetBiosSetting({item}) returned: {ret}"));
                 var r2 = Call("Lenovo_SaveBiosSettings", "SaveBiosSettings", p => p["parameter"] = ";");
                 string ret2 = r2["return"] as string;
                 if (!Gpu.Eq(ret2, "Success"))
@@ -353,13 +354,13 @@ namespace TBMini
                     try
                     {
                         var d = Call("Lenovo_DiscardBiosSettings", "DiscardBiosSettings", p => p["parameter"] = ";");
-                        undo = Gpu.Eq(d["return"] as string, "Success") ? "已撤销本次修改" : "撤销失败：" + d["return"];
+                        undo = Gpu.Eq(d["return"] as string, "Success") ? T("已撤销本次修改", "change discarded") : T("撤销失败：", "discard failed: ") + d["return"];
                     }
-                    catch (Exception ex) { undo = "撤销失败：" + ex.Message; }
-                    throw new InvalidOperationException("SaveBiosSettings 返回：" + ret2 + "（" + undo + "）");
+                    catch (Exception ex) { undo = T("撤销失败：", "discard failed: ") + ex.Message; }
+                    throw new InvalidOperationException(T("SaveBiosSettings 返回：", "SaveBiosSettings returned: ") + ret2 + T("（", " (") + undo + T("）", ")"));
                 }
                 string now = Get(item);
-                if (!Gpu.Eq(now, value)) throw new InvalidOperationException($"写入后读回的是「{now}」，不是「{value}」");
+                if (!Gpu.Eq(now, value)) throw new InvalidOperationException(T($"写入后读回的是「{now}」，不是「{value}」", $"Read back \"{now}\" after writing, not \"{value}\""));
             }
         }
     }

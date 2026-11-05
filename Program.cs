@@ -7,6 +7,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using static TBMini.L10n;
 
 [assembly: System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
 
@@ -47,7 +48,7 @@ namespace TBMini
 #if TBMINI_DEV
             if (DevMain(args, out int devRc)) return devRc;
 #endif
-            if (a0 == "--status" || a0 == "--power" || a0 == "--autostart" || a0 == "--features" ||
+            if (a0 == "--status" || a0 == "--power" || a0 == "--autostart" || a0 == "--features" || a0 == "--sensors" ||
                 a0 == "--version" || a0 == "--help" || a0 == "-h" || a0 == "/?")
                 return Cli(args);
 
@@ -136,7 +137,7 @@ namespace TBMini
                             "auto" or "intelligent" or "智能" => PowerMode.Auto,
                             "perf" or "performance" or "性能" => PowerMode.Performance,
                             "geek" or "极客" => PowerMode.Geek,
-                            _ => throw new ArgumentException("用法: TBMini --power saver|auto|perf|geek"),
+                            _ => throw new ArgumentException(T("用法: ", "Usage: ") + "TBMini --power saver|auto|perf|geek"),
                         };
                         Its.Set(m);
                         sb.AppendLine("power=" + Its.Name(Its.Read()));
@@ -158,7 +159,7 @@ namespace TBMini
                             try { sb.AppendLine("bios_password=" + Gpu.SupervisorPasswordSet()); } catch (Exception e) { sb.AppendLine("bios_password=ERR " + e.Message); }
                             sb.AppendLine("bitlocker=" + Gpu.SystemDriveBitLocker());
                         }
-                        else sb.AppendLine("gpu: (BIOS 设置需要管理员权限读取)");
+                        else sb.AppendLine(T("gpu: (BIOS 设置需要管理员权限读取)", "gpu: (reading BIOS settings needs administrator rights)"));
                         sb.AppendLine("after_boot_igpu=" + AfterBoot.Load());
                         break;
 
@@ -170,8 +171,19 @@ namespace TBMini
                             try { int v = f.Read(); val = v >= 0 && v < f.Options.Length ? $"{v} ({f.Options[v]})" : v.ToString(); }
                             catch (NotSupportedException e) { val = "unsupported: " + e.Message; }
                             catch (Exception e) { val = "ERR " + e.GetType().Name + ": " + e.Message; }
-                            sb.AppendLine($"{f.Id,-9} {f.Section}/{f.Label} = {val}   [{string.Join("|", f.Options)}]  {sw.ElapsedMilliseconds} ms");
+                            sb.AppendLine($"{f.Id,-9} {Sec.Title(f.Section)}/{f.Label} = {val}   [{string.Join("|", f.Options)}]  {sw.ElapsedMilliseconds} ms");
                         }
+                        break;
+
+                    case "--sensors":    // two samples 1 s apart (power counters need an interval)
+                        Sensors.Begin();
+                        Sensors.Read();
+                        Thread.Sleep(1000);
+                        var r = Sensors.Read();
+                        Sensors.Release();
+                        sb.AppendLine("cpu_temp_c=" + Sensors.Fmt(r.CpuTemp) + "  cpu_w=" + Sensors.Fmt(r.CpuW, 1));
+                        sb.AppendLine("gpu=" + r.Gpu + "  gpu_temp_c=" + Sensors.Fmt(r.GpuTemp) + "  gpu_w=" + Sensors.Fmt(r.GpuW, 1));
+                        sb.AppendLine("total_w=" + Sensors.Fmt(r.TotalW, 1) + "  (" + (r.TotalIsBattery ? "battery discharge" : "cpu+gpu, on AC") + ")");
                         break;
 
                     case "--autostart":
@@ -187,11 +199,12 @@ namespace TBMini
 
                     default:
                         sb.AppendLine("TBMini " + Version);
-                        sb.AppendLine("TBMini                                  托盘模式（自动请求管理员权限）");
-                        sb.AppendLine("TBMini --status [--out file]            当前状态（只读）");
-                        sb.AppendLine("TBMini --features [--out file]          所有设置项的当前值（只读）");
-                        sb.AppendLine("TBMini --power saver|auto|perf|geek     切换性能模式");
-                        sb.AppendLine("TBMini --autostart on|off|status        开机自启（需要管理员）");
+                        sb.AppendLine("TBMini                                  " + T("托盘模式（自动请求管理员权限）", "tray mode (asks for administrator rights)"));
+                        sb.AppendLine("TBMini --status [--out file]            " + T("当前状态（只读）", "current state (read-only)"));
+                        sb.AppendLine("TBMini --features [--out file]          " + T("所有设置项的当前值（只读）", "every setting's current value (read-only)"));
+                        sb.AppendLine("TBMini --sensors [--out file]           " + T("温度和功耗（只读）", "temperatures and power (read-only)"));
+                        sb.AppendLine("TBMini --power saver|auto|perf|geek     " + T("切换性能模式", "switch the performance mode"));
+                        sb.AppendLine("TBMini --autostart on|off|status        " + T("开机自启（需要管理员）", "start at sign-in (needs administrator)"));
                         break;
                 }
             }

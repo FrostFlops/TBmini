@@ -5,8 +5,10 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using static TBMini.L10n;
 
 namespace TBMini
 {
@@ -71,6 +73,8 @@ namespace TBMini
         public const string Battery = "", Charging = "", Plug = "", Keyboard = "", Palette = "", Speaker = "";
         public const string Chevron = "";
 
+        public const string Game = "\uE7FC", Bolt = "\uE945";
+
         public static string ForPower(PowerMode m) => m switch
         {
             PowerMode.Saver => Eco, PowerMode.Auto => Sparkle, PowerMode.Performance => Fast, PowerMode.Geek => Flame, _ => "?",
@@ -88,16 +92,19 @@ namespace TBMini
         static readonly GpuMode[] GpuModes = { GpuMode.Hybrid, GpuMode.IgpuOnly, GpuMode.Discrete };
         static readonly string[] GpuGlyphs = { Glyph.Hybrid, Glyph.Chip, Glyph.Monitor };
         static readonly Color[] GpuColors = { Color.FromArgb(0x3B, 0x82, 0xF6), Color.FromArgb(0x14, 0xB8, 0xA6), Color.FromArgb(0x76, 0xB9, 0x00) };
-        static readonly string[] LeftSections = { "电池", "电源" };
+        static readonly string[] LeftSections = { Sec.Battery, Sec.Power, Sec.App };
 
         readonly TrayApp _app;
         readonly float _s;
         Theme _t = Theme.Load();
-        readonly Font _title, _sec, _row, _small, _tileText;
+        readonly Font _title, _sec, _row, _small, _tileText, _value;
         readonly ToolTip _tip = new ToolTip { InitialDelay = 350, AutoPopDelay = 15000 };
 
         readonly Label _hTitle;
         readonly Chip _chipPower, _chipGpu;
+        readonly Metric _mCpu, _mGpu, _mTotal;
+        readonly Timer _sensorTimer = new Timer { Interval = 1500 };
+        bool _sensing;
         readonly Label _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
         readonly Tile[] _pt = new Tile[4];
@@ -140,48 +147,137 @@ namespace TBMini
             _row = new Font(ui, 9f);
             _small = new Font(ui, 8.25f);
             _tileText = new Font(ui, 8.75f);
+            _value = new Font("Segoe UI Semibold", 9.25f);
             Width = S(2 * ColW + Gap + 2 * Pad);
 
             _hTitle = new Label { Text = "TBMini", Font = _title, AutoSize = true };
             _chipPower = new Chip { Font = _small, Ui = _s };
             _chipGpu = new Chip { Font = _small, Ui = _s, Glyph = Glyph.Chip };
             Controls.AddRange(new Control[] { _hTitle, _chipPower, _chipGpu });
+            _mCpu = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Chip, Label = "CPU", Warm = 80, Hot = 95 };
+            _mGpu = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Game, Label = "GPU", Warm = 75, Hot = 87 };
+            _mTotal = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Bolt };
+            Controls.AddRange(new Control[] { _mCpu, _mGpu, _mTotal });
+            _sensorTimer.Tick += (s, e) => PollSensors();
 
-            _secPerf = SectionLabel("性能模式");
+            _secPerf = SectionLabel("");
             _cardPerf = new Card { Ui = _s };
             for (int i = 0; i < 4; i++)
             {
                 var m = PowerModes[i];
-                var t = new Tile { Text = Its.Name(m), Glyph = Glyph.ForPower(m), Accent = Draw.ModeColor(m), Font = _tileText, Ui = _s };
+                var t = new Tile { Glyph = Glyph.ForPower(m), Accent = Draw.ModeColor(m), Font = _tileText, Ui = _s };
                 t.Click += (s, e) => _app.SetPower(m);
                 _pt[i] = t; _cardPerf.Controls.Add(t);
             }
-            _secGpu = SectionLabel("显卡模式");
+            _secGpu = SectionLabel("");
             _cardGpu = new Card { Ui = _s };
             for (int i = 0; i < 3; i++)
             {
                 var g = GpuModes[i];
-                var t = new Tile { Text = Gpu.Name(g), Glyph = GpuGlyphs[i], Accent = GpuColors[i], Font = _tileText, Ui = _s };
+                var t = new Tile { Glyph = GpuGlyphs[i], Accent = GpuColors[i], Font = _tileText, Ui = _s };
                 t.Click += (s, e) => _app.SetGpu(g);
                 _gt[i] = t; _cardGpu.Controls.Add(t);
             }
-            _tip.SetToolTip(_pt[0], "省电：低功耗、安静");
-            _tip.SetToolTip(_pt[1], "智能：按负载自动调节");
-            _tip.SetToolTip(_pt[2], "性能：高功耗释放");
-            _tip.SetToolTip(_gt[0], "混合：内屏走核显，独显按需工作（切入/切出独显直连要重启）");
-            _tip.SetToolTip(_gt[1], "集显：混合模式下关掉独显，不用重启；独显被占用时不会生效");
-            _tip.SetToolTip(_gt[2], "独显直连：内屏直接接独显（MUX），需要重启");
             Controls.AddRange(new Control[] { _secPerf, _cardPerf, _secGpu, _cardGpu });
 
             _status = new Label { Font = _small, AutoSize = false };
-            _link = new LinkLabel { Text = "立即重启", Font = _small, AutoSize = true, Visible = false };
+            _link = new LinkLabel { Font = _small, AutoSize = true, Visible = false };
             _link.LinkClicked += (s, e) => { Hide(); _app.RestartNow(); };
             Controls.AddRange(new Control[] { _status, _link });
 
             Deactivate += (s, e) => { if (!_menuOpen) { HiddenAt = Environment.TickCount; Hide(); } };
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Hide(); };
+            ApplyTexts();
             ApplyTheme();
             Relayout();
+        }
+
+        /// Fixed texts (feature rows carry their own, from the registry).
+        void ApplyTexts()
+        {
+            _secPerf.Text = T("性能模式", "Performance mode");
+            _secGpu.Text = T("显卡模式", "GPU mode");
+            for (int i = 0; i < 4; i++) _pt[i].Text = Its.Name(PowerModes[i]);
+            for (int i = 0; i < 3; i++) _gt[i].Text = Gpu.Name(GpuModes[i]);
+            _tip.SetToolTip(_pt[0], T("省电：低功耗、安静", "Saver: low power, quiet"));
+            _tip.SetToolTip(_pt[1], T("智能：按负载自动调节", "Auto: adjusts to the load"));
+            _tip.SetToolTip(_pt[2], T("性能：高功耗释放", "Performance: higher power limits"));
+            _tip.SetToolTip(_gt[0], T("混合：内屏走核显，独显按需工作（切入/切出独显直连要重启）",
+                                      "Hybrid: the display runs on the iGPU and the dGPU works on demand (switching to or from dGPU direct needs a restart)"));
+            _tip.SetToolTip(_gt[1], T("集显：混合模式下关掉独显，不用重启；独显被占用时不会生效",
+                                      "iGPU only: turns the dGPU off within Hybrid, no restart; does not apply while an app is using the dGPU"));
+            _tip.SetToolTip(_gt[2], T("独显直连：内屏直接接独显（MUX），需要重启", "dGPU direct: the display is wired straight to the dGPU (MUX); needs a restart"));
+            _tip.SetToolTip(_mCpu, T("CPU 封装功耗（RAPL）。固件提供 CPU 温度时也会显示",
+                                     "CPU package power (RAPL). The temperature is shown too where the firmware reports it"));
+            _tip.SetToolTip(_mGpu, T("独显温度和功耗（NVIDIA 驱动）。独显休眠时不读取，以免把它唤醒",
+                                     "dGPU temperature and power (NVIDIA driver). Not read while the dGPU sleeps, so it is never woken up"));
+            _link.Text = T("立即重启", "Restart now");
+            _totalTip = null;
+        }
+
+        /// Language changed: re-create the feature rows from the rebuilt registry and refresh every text.
+        public void Relocalize()
+        {
+            if (IsDisposed) return;
+            SuspendLayout();
+            foreach (var r in _rows.Values) { _tip.SetToolTip(r.Label, null); _tip.SetToolTip(r.Ctl, null); }
+            foreach (var (label, card) in _sections.Values) { Controls.Remove(label); Controls.Remove(card); label.Dispose(); card.Dispose(); }
+            _sections.Clear();
+            _rows.Clear();
+            ApplyTexts();
+            ResumeLayout(false);
+            ApplyTheme();
+            UpdateView();
+            Relayout();
+            if (_last != null) ShowSensors(_last);
+        }
+
+        // ------------------------------------------------------------------ sensors (only while visible)
+        SensorData _last;
+        string _totalTip;
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Visible) { Sensors.Begin(); _sensorTimer.Start(); PollSensors(); }
+            else { _sensorTimer.Stop(); Sensors.End(); }
+        }
+
+        void PollSensors()
+        {
+            if (_sensing || !Visible) return;
+            _sensing = true;
+            Task.Run(Sensors.Read).ContinueWith(t =>
+            {
+                _sensing = false;
+                if (IsDisposed || !Visible || t.Status != TaskStatus.RanToCompletion) return;
+                _last = t.Result;
+                ShowSensors(_last);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        static string Deg(double v) => double.IsNaN(v) ? "" : $"{v:0}°C";
+        static string Watt(double v) => double.IsNaN(v) ? "—" : v < 10 ? $"{v:0.0} W" : $"{v:0} W";
+
+        void ShowSensors(SensorData d)
+        {
+            _mCpu.Set(d.CpuTemp, Deg(d.CpuTemp), Watt(d.CpuW), false);
+            switch (d.Gpu)
+            {
+                case GpuPower.Active: _mGpu.Set(d.GpuTemp, Deg(d.GpuTemp), Watt(d.GpuW), false); break;
+                case GpuPower.Asleep: _mGpu.Set(double.NaN, "", T("休眠", "Asleep"), true); break;
+                case GpuPower.Off: _mGpu.Set(double.NaN, "", T("已断开", "Off"), true); break;
+                default: _mGpu.Set(double.NaN, "", "—", true); break;
+            }
+            bool battery = d.TotalIsBattery || !_app.OnAc;
+            string label = battery ? T("整机", "System") : "CPU+GPU";
+            if (_mTotal.Label != label) { _mTotal.Label = label; _mTotal.Invalidate(); }
+            _mTotal.Set(double.NaN, "", Watt(d.TotalW), false);
+            string tip = battery
+                ? T("整机功耗（电池放电功率）", "Whole-system power (battery discharge rate)")
+                : T("接电源时没有整机功率计，这里是 CPU 与独显功耗之和。拔掉电源后显示整机功耗。",
+                    "On AC there is no whole-system power meter, so this is CPU plus dGPU power. Unplug to see whole-system power.");
+            if (tip != _totalTip) { _totalTip = tip; _tip.SetToolTip(_mTotal, tip); }   // re-setting resets a showing tooltip
         }
 
         Label SectionLabel(string text) => new Label { Text = text, Font = _sec, AutoSize = true };
@@ -218,7 +314,7 @@ namespace TBMini
             if (_rows.TryGetValue(f.Id, out var r)) return r;
             if (!_sections.TryGetValue(f.Section, out var sec))
             {
-                sec = (SectionLabel(f.Section), new Card { Ui = _s });
+                sec = (SectionLabel(Sec.Title(f.Section)), new Card { Ui = _s });
                 _sections[f.Section] = sec;
                 Controls.Add(sec.label); Controls.Add(sec.card);
             }
@@ -301,7 +397,11 @@ namespace TBMini
             _chipPower.Size = new Size(_chipPower.PreferredWidth, chipH);
             _chipGpu.Location = new Point(Width - pad - _chipGpu.Width, cy);
             _chipPower.Location = new Point(_chipGpu.Left - S(8) - _chipPower.Width, cy);
-            int top = S(56);
+            int mGap = S(8), mW = (Width - 2 * pad - 2 * mGap) / 3, mY = S(50), mH = S(32);
+            _mCpu.Bounds = new Rectangle(x0, mY, mW, mH);
+            _mGpu.Bounds = new Rectangle(x0 + mW + mGap, mY, mW, mH);
+            _mTotal.Bounds = new Rectangle(Width - pad - mW, mY, mW, mH);
+            int top = mY + mH + S(14);
 
             // left column: modes
             int yL = top;
@@ -380,7 +480,7 @@ namespace TBMini
             _t = Theme.Load();
             BackColor = _t.Bg;
             _hTitle.ForeColor = _t.Fg; _hTitle.BackColor = _t.Bg;
-            foreach (var c in new[] { _chipPower, _chipGpu }) c.T = _t;
+            foreach (var c in new Owner[] { _chipPower, _chipGpu, _mCpu, _mGpu, _mTotal }) c.T = _t;
             foreach (var l in new[] { _secPerf, _secGpu, _status }) { l.ForeColor = _t.Sub; l.BackColor = _t.Bg; }
             foreach (var c in new[] { _cardPerf, _cardGpu }) c.T = _t;
             foreach (var t in _pt.Concat(_gt)) t.T = _t;
@@ -418,7 +518,7 @@ namespace TBMini
                 _pt[i].Enabled = !busy && (PowerModes[i] != PowerMode.Geek || geekOk);
                 _pt[i].Invalidate();
             }
-            _tip.SetToolTip(_pt[3], geekOk ? "极客：最高功耗（仅接电源）" : "极客模式只能在接电源时使用");
+            _tip.SetToolTip(_pt[3], geekOk ? T("极客：最高功耗（仅接电源）", "Geek: maximum power (AC only)") : T("极客模式只能在接电源时使用", "Geek mode is only available on AC power"));
 
             var gi = _app.GpuInfo;
             for (int i = 0; i < 3; i++)
@@ -433,9 +533,11 @@ namespace TBMini
             bool ac = _app.OnAc;
             string pct = ps.BatteryLifePercent <= 1f ? $"{(int)Math.Round(ps.BatteryLifePercent * 100)}%" : "";
             _chipPower.Glyph = ac ? Glyph.Charging : Glyph.BatteryLevel(ps.BatteryLifePercent);
-            _chipPower.Text = (ac ? "接电源" : "电池") + (pct != "" ? " · " + pct : "");
+            _chipPower.Text = (ac ? T("接电源", "On AC") : T("电池", "Battery")) + (pct != "" ? " · " + pct : "");
             string pend = _app.PendingText();
             _chipGpu.Text = _app.GpuText() + (pend != null ? " → " + pend : "");
+            int gIdx = Array.IndexOf(GpuModes, gi.Mode);
+            _chipGpu.Glyph = gIdx >= 0 ? GpuGlyphs[gIdx] : Glyph.Chip;
             _chipPower.Invalidate(); _chipGpu.Invalidate();
 
             // feature rows
@@ -468,13 +570,13 @@ namespace TBMini
             }
 
             string line = "";
-            if (!Its.Supported) line = "没找到联想 ITS 服务，性能模式不可用";
-            if (busy) line = Join(line, "切换中…");
-            if (!Program.IsAdmin) line = Join(line, "显卡和 BIOS 项需要管理员权限（点显卡按钮可提权）");
-            else if (gi.Error != null) line = Join(line, "显卡：" + gi.Error);
-            else if (!gi.RunningKnown) line = Join(line, "内屏未点亮，显卡按 BIOS 显示");
-            if (pend != null) line = Join(line, "重启后显卡切到「" + pend + "」");
-            if (line == "") line = "Ctrl+Alt+Shift+T 随时重新打开触摸板";
+            if (!Its.Supported) line = T("没找到联想 ITS 服务，性能模式不可用", "Lenovo ITS service not found; performance modes are unavailable");
+            if (busy) line = Join(line, T("切换中…", "Switching…"));
+            if (!Program.IsAdmin) line = Join(line, T("显卡和 BIOS 项需要管理员权限（点显卡按钮可提权）", "GPU and BIOS settings need administrator rights (click a GPU button to elevate)"));
+            else if (gi.Error != null) line = Join(line, T("显卡：", "GPU: ") + gi.Error);
+            else if (!gi.RunningKnown) line = Join(line, T("内屏未点亮，显卡按 BIOS 显示", "Internal display off; GPU mode shown from BIOS"));
+            if (pend != null) line = Join(line, T("重启后显卡切到「" + pend + "」", "GPU switches to " + pend + " after a restart"));
+            if (line == "") line = T("Ctrl+Alt+Shift+T 随时重新打开触摸板", "Ctrl+Alt+Shift+T turns the touchpad back on at any time");
             _status.Text = line;
 
             _link.Visible = pend != null;
@@ -515,7 +617,12 @@ namespace TBMini
             UpdateView();
             Relayout();
             Location = new Point(-20000, -20000);
+            _sensing = true;                       // no async poll racing the synchronous one below
             Show();
+            Sensors.Begin();
+            Sensors.Read();
+            System.Threading.Thread.Sleep(1000);
+            ShowSensors(Sensors.Read());
             Application.DoEvents();
             using var bmp = new Bitmap(Width, Height);
             DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height));
@@ -624,8 +731,13 @@ namespace TBMini
             if (!Selected) Stroke(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), 6 * Ui, Theme.Mix(T.CardBorder, bg, 0.3f));
             int gh = S(26);
             DrawGlyph(g, Glyph, 18, new Rectangle(0, S(9), Width, gh), Selected ? fg : (Enabled ? Accent : T.Disabled));
-            TextRenderer.DrawText(g, Text, Font, new Rectangle(0, S(9) + gh, Width, Height - S(9) - gh - S(4)), fg,
+            // shrink long labels (e.g. English "Performance") to fit instead of cutting them off
+            var font = Font;
+            int avail = Width - S(8), tw = TextRenderer.MeasureText(g, Text, font).Width;
+            if (tw > avail) font = new Font(Font.FontFamily, Math.Max(7f, Font.Size * avail / tw), Font.Style);
+            TextRenderer.DrawText(g, Text, font, new Rectangle(0, S(9) + gh, Width, Height - S(9) - gh - S(4)), fg,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            if (!ReferenceEquals(font, Font)) font.Dispose();
         }
     }
 
@@ -732,6 +844,52 @@ namespace TBMini
             DrawGlyph(g, Glyph, 13, new Rectangle(S(9), 0, S(16), Height), T.Sub);
             TextRenderer.DrawText(g, Text, Font, new Rectangle(S(28), 0, Width - S(30), Height), T.Fg,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+        }
+    }
+
+    /// Header bubble with a live reading: glyph, label, then temperature and power right-aligned.
+    sealed class Metric : Owner
+    {
+        public string Glyph = "", Label = "", Temp = "", Value = "—";
+        public Font ValueFont;
+        public double Warm = 80, Hot = 95, TempC = double.NaN;
+        public bool Muted;
+
+        public Metric() { Cursor = Cursors.Default; }
+
+        public void Set(double tempC, string temp, string value, bool muted)
+        {
+            if (TempC.Equals(tempC) && Temp == temp && Value == value && Muted == muted) return;
+            TempC = tempC; Temp = temp; Value = value; Muted = muted;
+            Invalidate();
+        }
+
+        Color TempColor()
+        {
+            if (double.IsNaN(TempC) || TempC < Warm) return T.Fg;
+            bool hot = TempC >= Hot;
+            return T.Dark ? (hot ? Color.FromArgb(0xF8, 0x71, 0x71) : Color.FromArgb(0xFB, 0xBF, 0x24))
+                          : (hot ? Color.FromArgb(0xDC, 0x26, 0x26) : Color.FromArgb(0xD9, 0x77, 0x06));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = Prep(e);
+            var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+            Fill(g, r, r.Height / 2f, T.Card);
+            Stroke(g, r, r.Height / 2f, T.CardBorder);
+            DrawGlyph(g, Glyph, 14, new Rectangle(S(11), 0, S(18), Height), T.Accent);
+            const TextFormatFlags F = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(g, Label, Font, new Rectangle(S(34), 0, Width / 2, Height), T.Sub, F | TextFormatFlags.Left);
+            var vf = ValueFont ?? Font;
+            int right = Width - S(14);
+            int vw = TextRenderer.MeasureText(g, Value, vf, Size.Empty, F).Width;
+            TextRenderer.DrawText(g, Value, vf, new Rectangle(right - vw, 0, vw + S(2), Height), Muted ? T.Sub : T.Fg, F | TextFormatFlags.Left);
+            if (Temp != "")
+            {
+                int tw = TextRenderer.MeasureText(g, Temp, vf, Size.Empty, F).Width;
+                TextRenderer.DrawText(g, Temp, vf, new Rectangle(right - vw - S(12) - tw, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
+            }
         }
     }
 

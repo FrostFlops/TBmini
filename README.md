@@ -1,103 +1,116 @@
 # TBMini
 
-**A tiny tray app that replaces the Lenovo 联想百应 / Vantage UI on the ThinkBook 16p G6.**
-Switch performance mode (incl. Geek mode), GPU mode (hybrid / iGPU-only / dGPU-direct), battery charge mode, keyboard backlight, Fn lock, colour presets, Dolby profile and more — from one small panel, without launching Lenovo's apps.
+**English** | [简体中文](README.zh-CN.md)
+
+**A tiny tray app that replaces the Lenovo 联想百应 (Baiying) / Vantage UI on the ThinkBook 16p G6.**
+Switch the performance mode (including Geek mode), the GPU mode (hybrid / iGPU only / dGPU direct), the battery charge mode, keyboard backlight, Fn lock, color presets, Dolby profile and more, and see live CPU, GPU and total power plus the GPU temperature, all from one small panel without launching Lenovo's apps.
 Lenovo's background services and drivers must stay installed: TBMini only replaces their UI.
 
-一个极简的托盘工具，用来替代 ThinkBook 16p G6 上「联想百应」的界面。不用再打开联想那一堆软件，就能切换性能模式、显卡模式和常用的硬件设置。
-
 <p align="center">
-  <img src="docs/screenshot-dark.png" width="720" alt="TBMini panel (dark)"><br>
-  <img src="docs/screenshot-light.png" width="720" alt="TBMini panel (light)">
+  <img src="docs/screenshot-en-dark.png" width="720" alt="TBMini panel (dark)"><br>
+  <img src="docs/screenshot-en-light.png" width="720" alt="TBMini panel (light)">
 </p>
 
-## 功能
+## Features
 
-| 分类 | 设置 |
+| Section | Settings |
 |---|---|
-| 性能模式 | 省电 / 智能 / 性能 / 极客（极客仅接电源时可用；Fn+Q 照常可用，图标会同步） |
-| 显卡模式 | 混合 / 集显（在混合模式内切换，不用重启；独显正被程序占用时不生效）/ 独显直连（切入或切出独显直连都需要重启，工具会提示） |
-| 电池 | 充电模式（普通 / 快充 / 养护）、夜间充电 |
-| 电源 | 持续 USB 供电（关 / 开 / 含电池关机）、开盖开机 |
-| 键盘 | 键盘背光（关 / 暗 / 亮 / 自动）、背光 30 秒自动关、记住背光设置、F1-F12 首行键（热键 / F1-F12）、Fn/Ctrl 交换、大写/数字锁定提示、触摸板开关 |
-| 显示 | 内屏出厂 X-Rite 色彩预设（D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709）。切换显卡模式后会自动重新应用 |
-| 声音 | 杜比音效（动态 / 电影 / 音乐 / 游戏 / 语音 / 定制 / 关闭）、麦克风 AI 降噪（关 / 多人 / 单人 / 空间） |
+| Status bar | Power source and battery level, current GPU mode; CPU power, dGPU temperature and power, total power (refreshed every 1.5 s while the panel is open) |
+| Performance mode | Saver / Auto / Performance / Geek (Geek only on AC power; Fn+Q still works and the icon follows it) |
+| GPU mode | Hybrid / iGPU only (switches within Hybrid, no restart; has no effect while an app is using the dGPU) / dGPU direct (switching to or from dGPU direct needs a restart; TBMini asks) |
+| Battery | Charge mode (Normal / Rapid / Conserve), night charging |
+| Power | Always-on USB (Off / On / + battery), power on when the lid opens |
+| Keyboard | Backlight (Off / Low / High / Auto), backlight off after 30 s, remember backlight, top-row keys (hotkeys / F1-F12), Fn/Ctrl swap, Caps Lock / Num Lock indicators, touchpad on/off |
+| Display | Factory X-Rite color presets for the internal display (D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709), re-applied automatically after a GPU mode switch |
+| Sound | Dolby Audio (Dynamic / Movie / Music / Game / Voice / Custom / Off), AI mic noise suppression (Off / Group / Single / Spatial) |
+| App | Language (System / 中文 / English), start at sign-in |
 
-机器不支持的设置项会自动隐藏。没有以管理员身份运行时，BIOS 相关的设置项也会隐藏。
+Settings the machine does not support are hidden. BIOS-backed settings are also hidden when TBMini is not running as administrator.
 
-## 安装
+### Temperature and power
 
-1. 从 [Releases](https://github.com/FrostFlops/TBmini/releases) 下载 `TBMini-vX.Y.Z-win-x64.zip`，解压到任意位置。附带的 `SHA256SUMS.txt` 可以用来校验下载。
-2. 运行 `TBMini.exe`，在 UAC 提示里允许（显卡模式和 BIOS 项需要管理员权限）。程序没有代码签名，第一次运行时 SmartScreen 可能会拦截，选「仍要运行」即可。
-3. 右键托盘图标 → **开机自启**。程序会复制到 `C:\Program Files\TBMini`，并以计划任务方式在登录时启动（不再弹 UAC，电池供电时也会启动）。
+- **CPU power:** the Windows "Energy Meter" performance counter (Intel RAPL package power).
+- **CPU temperature:** not shown on the ThinkBook 16p G6. Its firmware does not report the CPU temperature to software: Lenovo's `LENOVO_GAMEZONE_DATA.GetCPUTemp` returns "invalid object" and there are no ACPI thermal zones. Reading the CPU's own sensor needs a kernel driver, which TBMini does not install. On Lenovo models whose firmware does implement `GetCPUTemp`, the CPU bubble shows it when TBMini runs as administrator.
+- **dGPU temperature and power:** NVML from the NVIDIA driver. When the dGPU is sleeping in Hybrid mode the bubble shows "Asleep", and TBMini never wakes the dGPU just to read it. In iGPU-only mode it shows "Off".
+- **Total power:** on battery this is the battery discharge rate, which is the real whole-system power. On AC there is no whole-system power meter to read, so the bubble is relabelled "CPU+GPU" and shows CPU plus dGPU power.
+- Readings are taken only while the panel is open. When the panel closes, polling stops and every handle is released, so there is no background power cost.
 
-需要 Windows 10/11 x64 和 .NET Framework 4.8（Windows 11 自带）。触摸板开关需要 Windows 11 24H2 或更高版本。
+## Install
 
-### 更新
+1. Download `TBMini-vX.Y.Z-win-x64.zip` from [Releases](https://github.com/FrostFlops/TBmini/releases) and unzip it anywhere. You can check the download against `SHA256SUMS.txt`.
+2. Run `TBMini.exe` and accept the UAC prompt (GPU mode and BIOS settings need administrator rights). The exe is not code-signed, so SmartScreen may warn on first launch; choose "Run anyway".
+3. Turn on **Start at sign-in** under App in the panel (or right-click the tray icon → Start at sign-in). TBMini copies itself to `C:\Program Files\TBMini` and starts at sign-in as a scheduled task: no UAC prompt, and it also starts on battery.
 
-右键托盘图标 → 退出，然后运行新版本的 `TBMini.exe`。如果开着「开机自启」，新版本会自动覆盖 `C:\Program Files\TBMini` 里的旧版本。
+Requires Windows 10/11 x64 and .NET Framework 4.8 (included in Windows 11). The touchpad switch needs Windows 11 24H2 or later.
 
-### 卸载
+### Update
 
-右键托盘图标 → 关闭「开机自启」→ 退出，然后删除 `C:\Program Files\TBMini` 文件夹和注册表项 `HKEY_CURRENT_USER\Software\TBMini`。
+Right-click the tray icon → Exit, then run the new `TBMini.exe`. If Start at sign-in is on, the new version replaces the copy in `C:\Program Files\TBMini` by itself.
 
-## 使用
+### Uninstall
 
-- **左键**托盘图标：打开面板。**右键**：菜单（开机自启、退出等）。
-- 托盘图标的颜色和图案表示当前性能模式。
-- 关闭触摸板前必须接有 USB 或蓝牙鼠标类设备（部分带鼠标功能的键盘或接收器也算）。关掉后，只要当时连接的任一鼠标被拔掉，触摸板会自动重新打开。TBMini 运行时，按 **Ctrl+Alt+Shift+T** 也可以重新打开触摸板。
+Turn off Start at sign-in → right-click the tray icon → Exit. Then delete the `C:\Program Files\TBMini` folder and the registry key `HKEY_CURRENT_USER\Software\TBMini`.
 
-### 命令行
+## Usage
 
-TBMini 是图形界面程序：在 PowerShell 里可以用 `TBMini --status | Out-String` 或 `--out status.txt` 拿到完整输出。
+- **Left-click** the tray icon to open the panel. **Right-click** for the menu (language, start at sign-in, exit and so on).
+- The tray icon's color and symbol show the current performance mode.
+- **Language:** App → Language in the panel, or Language in the tray menu. The change applies immediately. "System" follows the Windows display language: Chinese on Chinese Windows, English otherwise.
+- Before the touchpad can be turned off, a USB or Bluetooth mouse-class device must be connected (some keyboards and receivers with mouse functions count). Once it is off, unplugging any mouse that was connected at that moment turns the touchpad back on. While TBMini is running, **Ctrl+Alt+Shift+T** also turns it back on.
+
+### Command line
+
+TBMini is a GUI app: in PowerShell, use `TBMini --status | Out-String` or `--out status.txt` to get the full output. Command-line output uses the same language setting.
 
 ```
-TBMini --status [--out file]          当前状态（只读）
-TBMini --features [--out file]        所有设置项的当前值（只读）
-TBMini --power saver|auto|perf|geek   切换性能模式
-TBMini --autostart on|off|status      开机自启（on/off 需要在管理员终端里运行）
+TBMini --status [--out file]          current state (read-only)
+TBMini --features [--out file]        every setting's current value (read-only)
+TBMini --sensors [--out file]         temperature and power readings (read-only)
+TBMini --power saver|auto|perf|geek   switch the performance mode
+TBMini --autostart on|off|status      start at sign-in (on/off need an admin terminal)
 TBMini --version
 ```
 
-## 依赖与兼容性
+## Dependencies and compatibility
 
-TBMini 本身不包含任何联想的文件，它调用的是机器上已经安装的联想组件，所以**请不要卸载联想百应 / Lenovo Vantage 服务**，只是不用再打开它们：
+TBMini ships no Lenovo or NVIDIA files. It calls components that are already installed, so **do not uninstall the Lenovo Baiying / Lenovo Vantage services**; you just no longer need to open them:
 
-- 性能模式：`LenovoProcessManagement`（Lenovo Dispatcher 服务，随驱动安装）
-- 电池、键盘背光、Fn Lock、持续 USB 供电：联想 ACPI 驱动（`\\.\EnergyDrv`）
-- 显卡模式、开盖开机：BIOS 的 WMI 接口（`Lenovo_SetBiosSetting`）；Fn/Ctrl 交换：`LENOVO_BIOS_ASSISTANT`
-- 大写/数字锁定提示：`LenovoFnAndFunctionKeys` 服务
-- 色彩模式：出厂预装的 X-Rite 校色文件（`C:\Windows\System32\spool\drivers\color\TPLCD_*.icm`）。开着 HDR 或「自动管理应用颜色」时预设不生效
-- 杜比音效：Dolby 音频驱动/服务，以及联想百应自带的 `DolbyRpcClient.dll`（开启「开机自启」时会复制一份到安装目录）
-- 麦克风降噪：Lenovo Vantage 的降噪插件（加载前会用 WinVerifyTrust 校验文件签名，并确认签名者是联想）
+- Performance mode: `LenovoProcessManagement` (the Lenovo Dispatcher service, installed with the drivers)
+- Battery, keyboard backlight, Fn lock, always-on USB: the Lenovo ACPI driver (`\\.\EnergyDrv`)
+- GPU mode, power on with lid open: the BIOS WMI interface (`Lenovo_SetBiosSetting`); Fn/Ctrl swap: `LENOVO_BIOS_ASSISTANT`
+- dGPU temperature and power: the NVIDIA driver's `nvml.dll`; CPU power: the Energy Meter counters built into Windows; CPU temperature (only on models that implement it): `LENOVO_GAMEZONE_DATA`
+- Caps Lock / Num Lock indicators: the `LenovoFnAndFunctionKeys` service
+- Color presets: the factory X-Rite profiles (`C:\Windows\System32\spool\drivers\color\TPLCD_*.icm`). They have no effect while HDR or "Automatically manage color for apps" is on
+- Dolby Audio: the Dolby audio driver and service, plus `DolbyRpcClient.dll` from Lenovo Baiying (copied to the install folder when Start at sign-in is turned on)
+- Mic noise suppression: Lenovo Vantage's noise-suppression plugin. Before loading it, TBMini checks its signature with WinVerifyTrust and confirms that Lenovo signed it
 
-另外，卸载联想百应 / Vantage 时，联想会把极客模式、电池养护、夜间充电恢复成默认值。
+Note that uninstalling Lenovo Baiying or Vantage makes Lenovo reset Geek mode, battery conservation and night charging to their defaults.
 
-目前只在 **ThinkBook 16p G6 IAX** 上测试过。显卡检测只支持 Intel 核显 + NVIDIA 独显的机型。程序不做机型检查：其他使用同一套联想接口的 ThinkBook / IdeaPad / 小新可能部分可用（不支持的设置项会隐藏），在其它机型上使用风险自负。
+Tested only on the **ThinkBook 16p G6 IAX**. GPU detection and readings support Intel iGPU + NVIDIA dGPU machines only. TBMini does not check the model: other ThinkBook / IdeaPad / Xiaoxin models that use the same Lenovo interfaces may partly work (unsupported settings are hidden). Use it on other models at your own risk.
 
-## 安全说明
+## Safety
 
-- **显卡模式**和**开盖开机**通过 `Lenovo_SetBiosSetting` 写入 BIOS：BIOS 设有管理员密码时会直接拒绝（请进 BIOS 修改）；BIOS 提供可选值列表时会校验目标值；保存失败会尝试撤销；写入后会读回校验。**Fn/Ctrl 交换**通过 `LENOVO_BIOS_ASSISTANT` 写入固件，写入后读回校验。
-- 当前实际生效的显卡模式以硬件为准（内屏挂在哪块显卡上），不会被快速启动 / 休眠误导。内屏没点亮时（合盖外接显示器、仅第二屏幕模式）无法确认当前模式，显卡切换会被拒绝，请先打开内屏。
-- 切换独显直连时，如果检测到系统盘开着 BitLocker，工具会提醒你先确认手里有恢复密钥。修改其它 BIOS 项（开盖开机、Fn/Ctrl 交换）前，请自行确认。
-- 空闲时不轮询：性能模式的变化通过注册表通知获得，其它都由系统事件驱动。只有在触摸板被关闭期间，才会每 15 秒检查一次外接鼠标是否还在。
+- **GPU mode** and **power on with lid open** are written to the BIOS through `Lenovo_SetBiosSetting`. TBMini refuses when a BIOS supervisor password is set (change the setting in BIOS setup instead), checks the target value against the BIOS's list of choices when one is provided, tries to discard the change if saving fails, and reads the value back afterwards. **Fn/Ctrl swap** is written to the firmware through `LENOVO_BIOS_ASSISTANT` and read back afterwards.
+- The GPU mode actually in effect comes from the hardware (which GPU drives the internal display), so Fast Startup and hibernation do not mislead it. While the internal display is off (lid closed with an external monitor, or "Second screen only"), the current mode cannot be confirmed and GPU switching is refused; turn the internal display on first.
+- When switching to dGPU direct with BitLocker on for the system drive, TBMini reminds you to make sure you have the recovery key. Before changing the other BIOS settings (power on with lid open, Fn/Ctrl swap), check this yourself.
+- No polling while idle: performance mode changes arrive through registry notifications, and everything else is driven by system events. Temperature and power are read only while the panel is open. The only timer is a check every 15 s for the external mouse, and it runs only while the touchpad is turned off.
 
-本项目与联想（Lenovo）无关，也未获得联想的认可。ThinkBook、Lenovo Vantage、联想百应是联想的商标；Dolby 是杜比实验室的商标。修改硬件和 BIOS 设置有风险，使用本软件即表示你自行承担风险。
+This project is not affiliated with or endorsed by Lenovo or NVIDIA. ThinkBook, Lenovo Vantage and 联想百应 are trademarks of Lenovo; NVIDIA is a trademark of NVIDIA Corporation; Dolby is a trademark of Dolby Laboratories. Changing hardware and BIOS settings carries risk; you use this software at your own risk.
 
-## 从源码构建
+## Build from source
 
-需要 .NET SDK 8 或更高版本（目标框架是 .NET Framework 4.8）：
+Requires the .NET SDK 8 or later (the target framework is .NET Framework 4.8):
 
 ```
 dotnet build TBMini.csproj -c Release
 ```
 
-输出在 `bin/Release/TBMini.exe`。推送 `vX.Y.Z` 标签会由 GitHub Actions 自动构建并发布 Release；`vX.Y.Z-xxx` 形式的标签会发布为预发布版本。
+The output is `bin/Release/TBMini.exe`. Pushing a `vX.Y.Z` tag makes GitHub Actions build and publish a release; a `vX.Y.Z-suffix` tag is published as a pre-release.
 
-## 致谢
+## Credits
 
-接口语义参考了 [Lenovo Legion Toolkit](https://github.com/BartoszCichecki/LenovoLegionToolkit)、它的社区维护分支 [LenovoLegionToolkit-Team/LenovoLegionToolkit](https://github.com/LenovoLegionToolkit-Team/LenovoLegionToolkit)，以及 [ThinkBook Toolkit](https://github.com/lhzlhz419/ThinkBookToolkit)。
+Interface semantics were cross-checked against [Lenovo Legion Toolkit](https://github.com/BartoszCichecki/LenovoLegionToolkit), its community fork [LenovoLegionToolkit-Team/LenovoLegionToolkit](https://github.com/LenovoLegionToolkit-Team/LenovoLegionToolkit), and [ThinkBook Toolkit](https://github.com/lhzlhz419/ThinkBookToolkit).
 
-## 许可证
+## License
 
 [GPL-3.0](LICENSE)

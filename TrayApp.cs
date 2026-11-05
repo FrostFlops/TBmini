@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using static TBMini.L10n;
 
 namespace TBMini
 {
@@ -31,7 +32,7 @@ namespace TBMini
 
         PowerMode _power = PowerMode.Unknown;
         bool _ac;
-        GpuSnapshot _gpu = new GpuSnapshot { Error = "读取中…" };
+        GpuSnapshot _gpu = new GpuSnapshot { Error = T("读取中…", "Reading…") };
         bool _busy;
         Icon _currentIcon;
         readonly Dictionary<string, FeatureState> _fstate = new Dictionary<string, FeatureState>();
@@ -133,8 +134,8 @@ namespace TBMini
         {
             _ = Task.Run(() =>
             {
-                try { Touchpad.Write(1); TouchpadGuard.Disarm(); _ui.Post(_ => { Balloon("触摸板已打开"); RefreshFeatures(); SyncGuardTimer(); }, null); }
-                catch (Exception e) { _ui.Post(_ => Error("打开触摸板失败", e), null); }
+                try { Touchpad.Write(1); TouchpadGuard.Disarm(); _ui.Post(_ => { Balloon(T("触摸板已打开", "Touchpad turned on")); RefreshFeatures(); SyncGuardTimer(); }, null); }
+                catch (Exception e) { _ui.Post(_ => Error(T("打开触摸板失败", "Could not turn the touchpad on"), e), null); }
             });
         }
 
@@ -142,7 +143,7 @@ namespace TBMini
         {
             if (!Program.IsAdmin)
             {
-                var s = new GpuSnapshot { Error = "需要管理员权限" };
+                var s = new GpuSnapshot { Error = T("需要管理员权限", "needs administrator rights") };
                 s.PanelOnDgpu = Gpu.InternalPanelOnDgpu();   // works without admin
                 if (s.PanelOnDgpu == true) { s.Running = Gpu.BiosDiscrete; s.Mode = GpuMode.Discrete; }
                 return s;
@@ -216,6 +217,7 @@ namespace TBMini
             string confirm = value >= 0 ? f.Confirm(value) : null;
             if (confirm != null && !Ask(confirm)) return;
             st.Busy = true; _panel.UpdateView();
+            bool wasZh = Zh;
             try
             {
                 await Task.Run(() =>
@@ -224,9 +226,10 @@ namespace TBMini
                     if (v == -2) { int cur = f.Read(); v = cur == 1 ? 0 : 1; }
                     f.Write(v);
                 });
-                if (f.Note != null) Balloon(f.Label + "：" + f.Note);
+                if (f.Note != null) Balloon(f.Label + T("：", ": ") + f.Note);
+                if (f.Id == "lang" && Zh != wasZh) ApplyLanguage();
             }
-            catch (Exception e) { Error(f.Label + " 设置失败", e); }
+            catch (Exception e) { Error(f.Label + T(" 设置失败", ": setting failed"), e); }
             finally
             {
                 try { st.Value = await Task.Run(() => f.Read()); } catch { }
@@ -259,12 +262,13 @@ namespace TBMini
                 if (s.Igpu == want) return null;
                 for (int i = 0; i < 6; i++)
                 {
-                    try { if (Gpu.SetIgpu(want)) return "显卡已切换为「" + Gpu.Name(Gpu.SubMode(want)) + "」"; } catch { }
+                    try { if (Gpu.SetIgpu(want)) return T("显卡已切换为「" + Gpu.Name(Gpu.SubMode(want)) + "」", "GPU switched to " + Gpu.Name(Gpu.SubMode(want))); } catch { }
                     Thread.Sleep(5000);
                 }
-                return "重启后没能切到「" + Gpu.Name(Gpu.SubMode(want)) + "」（独显可能被占用），请在面板里再点一次";
+                return T("重启后没能切到「" + Gpu.Name(Gpu.SubMode(want)) + "」（独显可能被占用），请在面板里再点一次",
+                         "Could not switch to " + Gpu.Name(Gpu.SubMode(want)) + " after the restart (the dGPU may be in use). Click it again in the panel.");
             }
-            catch (Exception e) { return "处理重启后的显卡设置失败：" + e.Message; }
+            catch (Exception e) { return T("处理重启后的显卡设置失败：", "Applying the GPU setting after the restart failed: ") + e.Message; }
         }
 
         /// Keep the firmware informed about dGPU presence (Lenovo's add-in / LLT do this on start, resume, AC change).
@@ -322,7 +326,7 @@ namespace TBMini
                     if (slash >= 0) n = n.Substring(slash + 1);
                     if (n.Length > 0 && !n.StartsWith("...")) names.Add(n);
                 }
-                return names.Count == 0 ? null : string.Join("、", names.Take(6));
+                return names.Count == 0 ? null : string.Join(T("、", ", "), names.Take(6));
             }
             catch { return null; }
         }
@@ -338,7 +342,7 @@ namespace TBMini
             if (_busy || m == _power) return;
             _busy = true; _panel.UpdateView();
             try { await Task.Run(() => Its.Set(m)); }
-            catch (Exception e) { Error("切换性能模式失败", e); }
+            catch (Exception e) { Error(T("切换性能模式失败", "Could not switch the performance mode"), e); }
             finally { _busy = false; PollPower(force: true); }
         }
 
@@ -347,15 +351,16 @@ namespace TBMini
             if (_busy) return;
             if (!Program.IsAdmin)
             {
-                if (Ask("切换显卡需要管理员权限。\n以管理员身份重新启动 TBMini？")) RelaunchElevated();
+                if (Ask(T("切换显卡需要管理员权限。\n以管理员身份重新启动 TBMini？", "Switching the GPU needs administrator rights.\nRestart TBMini as administrator?"))) RelaunchElevated();
                 return;
             }
             _busy = true; _panel.UpdateView();
             try
             {
                 var s = await Task.Run(Gpu.Snapshot);
-                if (s.Staged == null) throw new InvalidOperationException("读不到 BIOS 的显卡设置");
-                if (!s.RunningKnown) throw new InvalidOperationException("内屏没有点亮（合盖？），无法确认当前是不是独显直连。打开内屏后再试。");
+                if (s.Staged == null) throw new InvalidOperationException(T("读不到 BIOS 的显卡设置", "Cannot read the BIOS graphics setting"));
+                if (!s.RunningKnown) throw new InvalidOperationException(T("内屏没有点亮（合盖？），无法确认当前是不是独显直连。打开内屏后再试。",
+                    "The internal display is off (lid closed?), so TBMini cannot tell whether dGPU direct is active. Turn the internal display on and try again."));
 
                 bool wantDiscrete = target == GpuMode.Discrete;
                 string wantBios = wantDiscrete ? Gpu.BiosDiscrete : Gpu.BiosSwitchable;
@@ -372,15 +377,16 @@ namespace TBMini
                         return wantIgpu < 0 || s.Igpu == wantIgpu || Gpu.SetIgpu(wantIgpu);
                     });
                     if (!ok && wantIgpu == 1)
-                        Balloon("集显模式没有生效：独显正被程序占用。关闭用独显的程序后再试。");
+                        Balloon(T("集显模式没有生效：独显正被程序占用。关闭用独显的程序后再试。", "iGPU only did not take effect: an app is using the dGPU. Close it and try again."));
                     else if (!ok)
-                        Balloon("显卡模式写入后读回不一致，请稍后再看一下状态");
+                        Balloon(T("显卡模式写入后读回不一致，请稍后再看一下状态", "The GPU mode read back differently after writing; check the status again shortly"));
                     else if (wantIgpu == 1 && before != 1)
                         _ = Task.Run(() =>
                         {
                             if (NudgeDgpuEject()) return;
                             string who = DgpuProcesses();
-                            _ui.Post(_ => Balloon("已切到集显，但独显还没断开" + (who != null ? "，正在使用独显：" + who : "") + "。关闭这些程序后会自动断开。"), null);
+                            _ui.Post(_ => Balloon(T("已切到集显，但独显还没断开" + (who != null ? "，正在使用独显：" + who : "") + "。关闭这些程序后会自动断开。",
+                                "Switched to iGPU only, but the dGPU is still attached" + (who != null ? ". Using the dGPU: " + who : "") + ". It detaches once those apps close.")), null);
                         });
                     else if (wantIgpu == 0 && before == 1)
                         _ = Task.Run(() => ReconcileDgpu(5000));
@@ -390,16 +396,19 @@ namespace TBMini
                     // ---- mux change: BIOS write + reboot ----
                     if (Gpu.Family(s.Staged) == wantBios && (wantIgpu < 0 || AfterBoot.Load() == wantIgpu))
                     {
-                        AskRestart("这个切换已经写入，重启后生效。");
+                        AskRestart(T("这个切换已经写入，重启后生效。", "This switch is already saved and takes effect after a restart."));
                         return;
                     }
                     _panel.Hide();
                     string warn = "";
                     if (await Task.Run(Gpu.SystemDriveBitLocker) == 1)
-                        warn += "\n\n⚠ 系统盘开着 BitLocker，修改 BIOS 设置可能要求输入恢复密钥，请先确认你有恢复密钥。";
+                        warn += T("\n\n⚠ 系统盘开着 BitLocker，修改 BIOS 设置可能要求输入恢复密钥，请先确认你有恢复密钥。",
+                                  "\n\n⚠ BitLocker is on for the system drive. Changing BIOS settings may ask for the recovery key, so make sure you have it.");
                     var choice = MessageBox.Show(
-                        $"切换到「{Gpu.Name(target)}」需要重启电脑才能生效。外接显示器可能需要重新插拔。{warn}\n\n" +
-                        "是：写入 BIOS 并立即重启（请先保存工作）\n否：写入 BIOS，稍后自己重启\n取消：不切换",
+                        T($"切换到「{Gpu.Name(target)}」需要重启电脑才能生效。外接显示器可能需要重新插拔。{warn}\n\n" +
+                          "是：写入 BIOS 并立即重启（请先保存工作）\n否：写入 BIOS，稍后自己重启\n取消：不切换",
+                          $"Switching to {Gpu.Name(target)} takes effect after a restart. External displays may need to be reconnected.{warn}\n\n" +
+                          "Yes: save to BIOS and restart now (save your work first)\nNo: save to BIOS, restart later yourself\nCancel: do not switch"),
                         "TBMini", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button3,
                         MessageBoxOptions.DefaultDesktopOnly);
                     if (choice == DialogResult.Cancel) return;
@@ -412,10 +421,10 @@ namespace TBMini
                         if (wantIgpu >= 0) AfterBoot.Save(wantIgpu); else AfterBoot.Clear();
                     });
                     if (choice == DialogResult.Yes) Reboot();
-                    else Balloon($"已写入，下次重启后切到「{Gpu.Name(target)}」");
+                    else Balloon(T($"已写入，下次重启后切到「{Gpu.Name(target)}」", $"Saved. Switches to {Gpu.Name(target)} at the next restart"));
                 }
             }
-            catch (Exception e) { Error("切换显卡模式失败", e); }
+            catch (Exception e) { Error(T("切换显卡模式失败", "Could not switch the GPU mode"), e); }
             finally
             {
                 _busy = false;
@@ -428,10 +437,10 @@ namespace TBMini
 
         void AskRestart(string head)
         {
-            if (Ask(head + "\n\n现在重启吗？（请先保存工作）")) Reboot();
+            if (Ask(head + T("\n\n现在重启吗？（请先保存工作）", "\n\nRestart now? (Save your work first.)"))) Reboot();
         }
 
-        internal void RestartNow() => AskRestart("显卡模式的更改要重启后才生效。");
+        internal void RestartNow() => AskRestart(T("显卡模式的更改要重启后才生效。", "The GPU mode change takes effect after a restart."));
 
         void RelaunchElevated()
         {
@@ -486,7 +495,7 @@ namespace TBMini
         void ToggleAutostart()
         {
             try { Balloon(AutostartEnabled() ? DisableAutostart() : EnableAutostart()); }
-            catch (Exception e) { Error("设置开机自启失败", e); }
+            catch (Exception e) { Error(T("设置开机自启失败", "Could not change start at sign-in"), e); }
         }
 
         /// Update path: if auto-start is on and we are a different build than the installed copy (and not the
@@ -509,7 +518,7 @@ namespace TBMini
         {
             var (c, o) = Schtasks($"/Delete /TN \"{TaskName}\" /F");
             if (c != 0) throw new InvalidOperationException(o);
-            return "已关闭开机自启";
+            return T("已关闭开机自启", "Start at sign-in turned off");
         }
 
         internal static string EnableAutostart()
@@ -556,7 +565,7 @@ namespace TBMini
                     if (c != 0) throw new InvalidOperationException(o);
                 }
                 finally { try { File.Delete(xmlPath); } catch { } }
-                return $"已开启开机自启（程序已复制到 {InstallDir}）";
+                return T($"已开启开机自启（程序已复制到 {InstallDir}）", $"Start at sign-in turned on (copied to {InstallDir})");
             }
         }
 
@@ -567,12 +576,12 @@ namespace TBMini
         {
             _menu.Items.Clear();
             _menu.Items.Add(new ToolStripMenuItem($"TBMini {Program.Version}") { Enabled = false });
-            _menu.Items.Add(new ToolStripMenuItem($"性能：{Its.Name(_power)}    显卡：{GpuText()}") { Enabled = false });
+            _menu.Items.Add(new ToolStripMenuItem(T($"性能：{Its.Name(_power)}    显卡：{GpuText()}", $"Performance: {Its.Name(_power)}    GPU: {GpuText()}")) { Enabled = false });
             _menu.Items.Add(new ToolStripSeparator());
             foreach (var m in new[] { PowerMode.Saver, PowerMode.Auto, PowerMode.Performance, PowerMode.Geek })
             {
                 bool geekOff = m == PowerMode.Geek && !Its.GeekAvailable;
-                var it = new ToolStripMenuItem(Its.Name(m) + (geekOff ? "（需接电源）" : ""))
+                var it = new ToolStripMenuItem(Its.Name(m) + (geekOff ? T("（需接电源）", " (needs AC power)") : ""))
                 { Checked = _power == m, Enabled = !_busy && !geekOff };
                 var mm = m; it.Click += (s, e) => SetPower(mm);
                 _menu.Items.Add(it);
@@ -580,38 +589,65 @@ namespace TBMini
             _menu.Items.Add(new ToolStripSeparator());
             foreach (var g in new[] { GpuMode.Hybrid, GpuMode.IgpuOnly, GpuMode.Discrete })
             {
-                var it = new ToolStripMenuItem("显卡：" + Gpu.Name(g)) { Checked = _gpu.Mode == g, Enabled = !_busy };
+                var it = new ToolStripMenuItem(T("显卡：", "GPU: ") + Gpu.Name(g)) { Checked = _gpu.Mode == g, Enabled = !_busy };
                 var gg = g; it.Click += (s, e) => SetGpu(gg);
                 _menu.Items.Add(it);
             }
             if (_gpu.PendingReboot)
             {
-                var it = new ToolStripMenuItem("重启以切到：" + PendingText());
+                var it = new ToolStripMenuItem(T("重启以切到：", "Restart to switch to: ") + PendingText());
                 it.Click += (s, e) => RestartNow();
                 _menu.Items.Add(it);
             }
             _menu.Items.Add(new ToolStripSeparator());
+            var lang = new ToolStripMenuItem("语言 / Language");
+            var langNames = new[] { T("跟随系统", "System"), "中文", "English" };
+            for (int i = 0; i < 3; i++)
+            {
+                var p = (LangPref)i;
+                var li = new ToolStripMenuItem(langNames[i]) { Checked = Pref == p };
+                li.Click += (s, e) => SetLanguage(p);
+                lang.DropDownItems.Add(li);
+            }
+            _menu.Items.Add(lang);
             if (Program.IsAdmin)
             {
-                var auto = new ToolStripMenuItem("开机自启") { Checked = AutostartEnabled(), Enabled = !_busy };
+                var auto = new ToolStripMenuItem(T("开机自启", "Start at sign-in")) { Checked = AutostartEnabled(), Enabled = !_busy };
                 auto.Click += (s, e) => ToggleAutostart();
                 _menu.Items.Add(auto);
             }
             else
             {
-                var el = new ToolStripMenuItem("以管理员身份重启 TBMini（显卡切换需要）");
+                var el = new ToolStripMenuItem(T("以管理员身份重启 TBMini（显卡切换需要）", "Restart TBMini as administrator (needed for GPU switching)"));
                 el.Click += (s, e) => RelaunchElevated();
                 _menu.Items.Add(el);
             }
-            var exit = new ToolStripMenuItem("退出") { Enabled = !_busy && !_fstate.Values.Any(x => x.Busy) };
+            var exit = new ToolStripMenuItem(T("退出", "Exit")) { Enabled = !_busy && !_fstate.Values.Any(x => x.Busy) };
             exit.Click += (s, e) => ExitThread();
             _menu.Items.Add(exit);
+        }
+
+        /// Tray-menu path: save the preference and refresh the UI.
+        void SetLanguage(LangPref p)
+        {
+            try { if (L10n.Set(p)) ApplyLanguage(); else RefreshFeatures(); }
+            catch (Exception e) { Error("Language", e); }
+        }
+
+        /// Re-resolve every UI string after a language change (labels are built into the feature registry).
+        void ApplyLanguage()
+        {
+            FeatureRegistry.Rebuild();
+            _panel.Relocalize();
+            UpdateIcon();
+            RefreshFeatures();
+            _ = RefreshGpuAsync();     // GPU status texts are produced while reading
         }
 
         internal string GpuText()
         {
             if (_gpu.Mode != GpuMode.Unknown) return Gpu.Name(_gpu.Mode);
-            if (_gpu.PanelOnDgpu == false && !Program.IsAdmin) return "非独显直连";
+            if (_gpu.PanelOnDgpu == false && !Program.IsAdmin) return T("非独显直连", "not dGPU direct");
             return "—";
         }
 
@@ -631,14 +667,15 @@ namespace TBMini
             _currentIcon = Draw.TrayIcon(_power);
             _icon.Icon = _currentIcon;
             old?.Dispose();
-            string t = $"TBMini · 性能：{Its.Name(_power)} · 显卡：{GpuText()}";
-            if (_gpu.PendingReboot) t += $"（重启后：{PendingText()}）";
+            string t = T($"TBMini · 性能：{Its.Name(_power)} · 显卡：{GpuText()}", $"TBMini · {Its.Name(_power)} · GPU: {GpuText()}");
+            if (_gpu.PendingReboot) t += T($"（重启后：{PendingText()}）", $" (after restart: {PendingText()})");
             _icon.Text = t.Length > 63 ? t.Substring(0, 63) : t;
         }
 
 #if TBMINI_DEV
         internal void RefreshForRender() => RefreshFeatures();
         internal void RenderPanelTo(string path) => _panel.RenderTo(path);
+        internal void ApplyLanguageForDev() => ApplyLanguage();
 #endif
 
         void ShowPanel()

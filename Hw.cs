@@ -14,6 +14,7 @@ using System.Threading;
 using System.Xml;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
+using static TBMini.L10n;
 
 namespace TBMini
 {
@@ -89,7 +90,7 @@ namespace TBMini
             lock (Gate)
             {
                 using var h = CreateFileW(@"\\.\EnergyDrv", 0xC0000000, 3, IntPtr.Zero, 3, 0x80, IntPtr.Zero);
-                if (h.IsInvalid) throw new NotSupportedException("打不开 EnergyDrv：" + new Win32Exception().Message);
+                if (h.IsInvalid) throw new NotSupportedException(T("打不开 EnergyDrv：", "Cannot open EnergyDrv: ") + new Win32Exception().Message);
                 if (!DeviceIoControl(h, code, ref input, 4, out uint o, 4, out _, IntPtr.Zero))
                     throw new Win32Exception();
                 Thread.Sleep(20);                       // Lenovo spaces EC calls out
@@ -119,7 +120,7 @@ namespace TBMini
         {
             using var s = new ManagementObjectSearcher(@"root\WMI", "SELECT * FROM LENOVO_BIOS_ASSISTANT");
             foreach (ManagementObject o in s.Get()) return o;
-            throw new NotSupportedException("LENOVO_BIOS_ASSISTANT 不存在");
+            throw new NotSupportedException(T("LENOVO_BIOS_ASSISTANT 不存在", "LENOVO_BIOS_ASSISTANT not found"));
         }
 
         public static uint Capability()
@@ -154,7 +155,7 @@ namespace TBMini
         public static int Read(string value)
         {
             using (var sc = new ServiceController(Svc))
-                if (sc.Status != ServiceControllerStatus.Running) throw new NotSupportedException(Svc + " 没运行");
+                if (sc.Status != ServiceControllerStatus.Running) throw new NotSupportedException(Svc + T(" 没运行", " is not running"));
             using var k = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(Key);
             if (k?.GetValue(value) is not int v) throw new NotSupportedException(value);
             return v == 1 ? 1 : 0;
@@ -163,7 +164,7 @@ namespace TBMini
         public static void Write(string value, int on, int codeOn, int codeOff)
         {
             using (var sc = new ServiceController(Svc)) sc.ExecuteCommand(on == 1 ? codeOn : codeOff);
-            if (!EnergyDrv.Poll(() => Read(value) == on, 10, 200)) throw new InvalidOperationException("服务没有应用这个设置");
+            if (!EnergyDrv.Poll(() => Read(value) == on, 10, 200)) throw new InvalidOperationException(T("服务没有应用这个设置", "The service did not apply this setting"));
         }
     }
 
@@ -198,7 +199,7 @@ namespace TBMini
         static TOUCHPAD_PARAMETERS Get()
         {
             var p = new TOUCHPAD_PARAMETERS { versionNumber = 1 };
-            if (!SystemParametersInfoW(0xAE, 44, ref p, 0)) throw new NotSupportedException("SPI_GETTOUCHPADPARAMETERS 失败");
+            if (!SystemParametersInfoW(0xAE, 44, ref p, 0)) throw new NotSupportedException(T("SPI_GETTOUCHPADPARAMETERS 失败", "SPI_GETTOUCHPADPARAMETERS failed"));
             return p;
         }
 
@@ -233,7 +234,7 @@ namespace TBMini
         public static int Read()
         {
             var p = Get();
-            if ((p.flags1 & 1) == 0) throw new NotSupportedException("没有精确式触摸板");
+            if ((p.flags1 & 1) == 0) throw new NotSupportedException(T("没有精确式触摸板", "No precision touchpad"));
             return (p.flags1 & 8) != 0 ? 1 : 0;
         }
 
@@ -244,7 +245,7 @@ namespace TBMini
             {
                 var p = Get();
                 if (on == 0 && ExternalMice().Length == 0)
-                    throw new InvalidOperationException("没有检测到外接鼠标。为防止无法操作，不能关闭触摸板。");
+                    throw new InvalidOperationException(T("没有检测到外接鼠标。为防止无法操作，不能关闭触摸板。", "No external mouse detected. The touchpad stays on so you are not locked out."));
                 if (((p.flags1 & 8) != 0) == (on == 1)) return;
                 p.flags1 = on == 1 ? p.flags1 | 8u : p.flags1 & ~8u;
                 SystemParametersInfoW(0xAF, 44, ref p, 3 /*SPIF_UPDATEINIFILE|SPIF_SENDCHANGE*/);
@@ -256,7 +257,7 @@ namespace TBMini
                 var keys = new ushort[] { 0x11, 0x5B, 0x87 };
                 var inputs = keys.Select(k => Key(k, false)).Concat(keys.Reverse().Select(k => Key(k, true))).ToArray();
                 SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
-                if (!EnergyDrv.Poll(() => Read() == on, 20, 100)) throw new InvalidOperationException("触摸板状态没有改变");
+                if (!EnergyDrv.Poll(() => Read() == on, 20, 100)) throw new InvalidOperationException(T("触摸板状态没有改变", "The touchpad state did not change"));
             }
         }
 
@@ -320,7 +321,9 @@ namespace TBMini
     // =============================================================================================
     public static class ColorPreset
     {
-        public static readonly string[] Labels = { "默认(D65)", "鲜艳(Native)", "网页办公(sRGB)", "摄影/影院(P3-D65)", "原生影院(P3-DCI)", "摄影印刷(Adobe RGB)", "HDTV(REC709)" };
+        public static string[] Labels => Zh
+            ? new[] { "默认(D65)", "鲜艳(Native)", "网页办公(sRGB)", "摄影/影院(P3-D65)", "原生影院(P3-DCI)", "摄影印刷(Adobe RGB)", "HDTV(REC709)" }
+            : new[] { "Default (D65)", "Vivid (Native)", "Web/office (sRGB)", "Photo/cinema (P3-D65)", "Cinema (P3-DCI)", "Print (Adobe RGB)", "HDTV (REC709)" };
         public static readonly string[] Suffix = { "Default", "Native", "sRGB", "DisplayP3", "DCIP3", "AdobeRGB", "REC709" };
         static readonly int[] LenovoValue = { 4, 7, 1, 3, 9, 2, 8 };
         static readonly object Gate = new object();
@@ -384,10 +387,10 @@ namespace TBMini
 
         static Ctx Context()
         {
-            string model = PanelModel() ?? throw new NotSupportedException("内屏未点亮");
-            string dev = MonitorDeviceId(model) ?? throw new NotSupportedException("找不到内屏的显示器设备");
+            string model = PanelModel() ?? throw new NotSupportedException(T("内屏未点亮", "Internal display is off"));
+            string dev = MonitorDeviceId(model) ?? throw new NotSupportedException(T("找不到内屏的显示器设备", "Internal display monitor device not found"));
             var c = new Ctx { Model = model, Dev = dev };
-            if (!System.IO.File.Exists(Path.Combine(ColorDir, c.File(0)))) throw new NotSupportedException("没有出厂校色文件");
+            if (!System.IO.File.Exists(Path.Combine(ColorDir, c.File(0)))) throw new NotSupportedException(T("没有出厂校色文件", "No factory color profiles"));
             return c;
         }
 
@@ -411,12 +414,12 @@ namespace TBMini
         static void WriteOn(Ctx c, int i)
         {
             string icm = c.File(i);
-            if (!System.IO.File.Exists(Path.Combine(ColorDir, icm))) throw new InvalidOperationException("缺少校色文件 " + icm);
+            if (!System.IO.File.Exists(Path.Combine(ColorDir, icm))) throw new InvalidOperationException(T("缺少校色文件 ", "Missing color profile ") + icm);
             WcsSetUsePerUserProfiles(c.Dev, CLASS_MONITOR, true);
             WcsAssociateColorProfileWithDevice(SCOPE_USER, icm, c.Dev);
             if (!WcsSetDefaultColorProfile(SCOPE_USER, c.Dev, CPT_ICC, CPST_RGB_WORKING_SPACE, 0, icm))
                 throw new Win32Exception();
-            if (ReadOn(c) != i) throw new InvalidOperationException("写入后读回不一致");
+            if (ReadOn(c) != i) throw new InvalidOperationException(T("写入后读回不一致", "Read-back after writing does not match"));
             using (var k = Registry.CurrentUser.CreateSubKey(@"Software\TBMini"))
             {
                 k.SetValue("ColorPreset", Suffix[i]);
@@ -463,7 +466,9 @@ namespace TBMini
     // =============================================================================================
     public static class Dolby
     {
-        public static readonly string[] Labels = { "动态", "电影", "音乐", "游戏", "语音", "定制", "关闭" };
+        public static string[] Labels => Zh
+            ? new[] { "动态", "电影", "音乐", "游戏", "语音", "定制", "关闭" }
+            : new[] { "Dynamic", "Movie", "Music", "Game", "Voice", "Custom", "Off" };
         static readonly int[] Profile = { 5, 0, 1, 2, 3, 4, -1 };
         static readonly string[] RuntimeName = { "dynamic", "movie", "music", "game", "voice", "personalize", null };
         const string Dll = "DolbyRpcClient.dll";
@@ -497,7 +502,7 @@ namespace TBMini
         static T Fn<T>(IntPtr h, string name) where T : Delegate
         {
             IntPtr p = GetProcAddress(h, name);
-            if (p == IntPtr.Zero) throw new NotSupportedException(Dll + " 缺少 " + name);
+            if (p == IntPtr.Zero) throw new NotSupportedException(Dll + L10n.T(" 缺少 ", " lacks ") + name);
             return Marshal.GetDelegateForFunctionPointer<T>(p);
         }
 
@@ -505,7 +510,7 @@ namespace TBMini
         {
             if (_initialize == null)
             {
-                string p = Find() ?? throw new NotSupportedException("找不到 " + Dll);
+                string p = Find() ?? throw new NotSupportedException(T("找不到 ", "Not found: ") + Dll);
                 IntPtr h = LoadLibraryExW(p, IntPtr.Zero, 0x8);
                 if (h == IntPtr.Zero) throw new NotSupportedException(new Win32Exception().Message);
                 _getEnabled = Fn<FnBool>(h, "DolbyClient_GetDolbyEnabled");
@@ -520,13 +525,13 @@ namespace TBMini
                 if (!_inited)
                 {
                     int rc = _initialize();
-                    if (rc != 0) throw new NotSupportedException("Dolby 服务连接失败 " + rc);
+                    if (rc != 0) throw new NotSupportedException(T("Dolby 服务连接失败 ", "Dolby service connection failed ") + rc);
                     _inited = true;
                 }
                 if (_alive()) return;   // liveness probe
                 _inited = false;
             }
-            throw new NotSupportedException("Dolby 服务无响应");
+            throw new NotSupportedException(T("Dolby 服务无响应", "Dolby service not responding"));
         }
 
         /// The user's main profile from Runtime.xml (unaffected by the temporary "voice" switch during calls).
@@ -577,7 +582,7 @@ namespace TBMini
                     Thread.Sleep(150);
                 }
                 _inited = false;
-                throw new InvalidOperationException("Dolby 没有切换成功");
+                throw new InvalidOperationException(T("Dolby 没有切换成功", "Dolby did not switch"));
             }
         }
     }
@@ -588,7 +593,7 @@ namespace TBMini
     // =============================================================================================
     public static class MicNoise
     {
-        public static readonly string[] BaseLabels = { "关", "多人", "单人", "空间" };
+        public static string[] BaseLabels => Zh ? new[] { "关", "多人", "单人", "空间" } : new[] { "Off", "Group", "Single", "Spatial" };
         public static readonly int[] BaseModes = { 0, 1, 2, 3 };
 
         public static string AddinDir()
@@ -656,8 +661,8 @@ namespace TBMini
             { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, StandardOutputEncoding = Encoding.UTF8 };
             using var p = Process.Start(psi);
             var task = p.StandardOutput.ReadToEndAsync();
-            if (!p.WaitForExit(20000)) { try { p.Kill(); } catch { } throw new System.TimeoutException("降噪插件无响应"); }
-            if (!task.Wait(3000)) throw new System.TimeoutException("降噪插件无输出");
+            if (!p.WaitForExit(20000)) { try { p.Kill(); } catch { } throw new System.TimeoutException(T("降噪插件无响应", "Noise plugin not responding")); }
+            if (!task.Wait(3000)) throw new System.TimeoutException(T("降噪插件无输出", "Noise plugin returned nothing"));
             string o = task.Result.Trim();
             if (o.StartsWith("ERR")) throw new NotSupportedException(o.Substring(3).Trim());
             return o;
@@ -695,19 +700,19 @@ namespace TBMini
             string output;
             try
             {
-                string dir = AddinDir() ?? throw new Exception("没有安装联想降噪插件");
+                string dir = AddinDir() ?? throw new Exception(T("没有安装联想降噪插件", "Lenovo noise plugin not installed"));
                 string dll = Path.Combine(dir, "SENoiseCancellingPlugin64.dll");
-                if (!SignedByLenovo(dll)) throw new Exception("降噪插件签名校验失败");
+                if (!SignedByLenovo(dll)) throw new Exception(T("降噪插件签名校验失败", "Noise plugin signature check failed"));
                 Environment.CurrentDirectory = dir;
                 SetDllDirectoryW(dir);
                 IntPtr h = LoadLibraryExW(dll, IntPtr.Zero, 0x8);
-                if (h == IntPtr.Zero) throw new Exception("加载插件失败 " + Marshal.GetLastWin32Error());
+                if (h == IntPtr.Zero) throw new Exception(T("加载插件失败 ", "Loading the plugin failed ") + Marshal.GetLastWin32Error());
                 var init = Marshal.GetDelegateForFunctionPointer<SeInit>(GetProcAddress(h, "se_plugin_init"));
                 var act = Marshal.GetDelegateForFunctionPointer<SeAction>(GetProcAddress(h, "se_plugin_action"));
                 var del = Marshal.GetDelegateForFunctionPointer<SeDelete>(GetProcAddress(h, "se_plugin_delete"));
                 _keep = (m, a, d, r, l) => 0;
                 int rc = init("F4006", _keep);
-                if (rc != 0) throw new Exception("插件初始化失败 " + rc);
+                if (rc != 0) throw new Exception(T("插件初始化失败 ", "Plugin init failed ") + rc);
 
                 string Do(string action, string data)
                 {
@@ -720,7 +725,7 @@ namespace TBMini
                 if (args.Length >= 3 && args[1] == "set")
                 {
                     int mode = int.Parse(args[2]);
-                    if (Array.IndexOf(new[] { 0, 1, 2, 3, 4, 10 }, mode) < 0) throw new Exception("无效模式");
+                    if (Array.IndexOf(new[] { 0, 1, 2, 3, 4, 10 }, mode) < 0) throw new Exception(T("无效模式", "Invalid mode"));
                     Do("set_microphone_mode", "{\"microphone_mode\":" + mode + "}");
                 }
                 output = Do("get_nc_status", "").Replace("\r", "").Replace("\n", "");
