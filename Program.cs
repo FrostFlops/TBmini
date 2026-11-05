@@ -1,0 +1,206 @@
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+[assembly: System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
+
+namespace TBMini
+{
+    static partial class Program
+    {
+        const string MutexName = @"Local\TBMini.Instance";
+        internal const string MsgWindowTitle = "TBMini.MsgWindow";
+        internal static readonly int ShowMessage = RegisterWindowMessage("TBMini.Show");
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int RegisterWindowMessage(string s);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int pid);
+        [DllImport("user32.dll")] static extern bool ChangeWindowMessageFilter(int msg, int flag);
+
+        internal static bool IsAdmin => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+        internal static string ExePath => Process.GetCurrentProcess().MainModule.FileName;
+        internal static string Version
+        {
+            get
+            {
+                var a = typeof(Program).Assembly;
+                var iv = ((System.Reflection.AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(
+                    a, typeof(System.Reflection.AssemblyInformationalVersionAttribute)))?.InformationalVersion;
+                return string.IsNullOrEmpty(iv) ? a.GetName().Version.ToString(3) : iv.Split('+')[0];
+            }
+        }
+
+        static bool Has(string[] args, string flag) => Array.Exists(args, x => x.Equals(flag, StringComparison.OrdinalIgnoreCase));
+
+        [STAThread]
+        static int Main(string[] args)
+        {
+            string a0 = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+            if (a0 == "--nc") { MicNoise.HelperMain(args); return 0; }   // noise-plugin helper child process
+#if TBMINI_DEV
+            if (DevMain(args, out int devRc)) return devRc;
+#endif
+            if (a0 == "--status" || a0 == "--power" || a0 == "--autostart" || a0 == "--features" ||
+                a0 == "--version" || a0 == "--help" || a0 == "-h" || a0 == "/?")
+                return Cli(args);
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            // ---- tray mode ----
+            // Already running (possibly elevated)? Ask it to show its panel. The running instance lets this message
+            // through UIPI, and we hand it foreground rights so its panel can take focus.
+            IntPtr existing = FindWindow(null, MsgWindowTitle);
+            if (existing != IntPtr.Zero && !Has(args, "--wait-mutex"))
+            {
+                AllowSetForegroundWindow(-1 /*ASFW_ANY*/);
+                PostMessage(existing, ShowMessage, IntPtr.Zero, IntPtr.Zero);
+                return 0;
+            }
+
+            if (!IsAdmin && !Has(args, "--no-elevate"))
+            {
+                try
+                {
+                    string exe = TrayApp.ElevationTarget();
+                    Process.Start(new ProcessStartInfo(exe, "--tray") { UseShellExecute = true, Verb = "runas" });
+                    return 0;
+                }
+                catch (Win32Exception) { /* UAC cancelled -> run without GPU control */ }
+            }
+
+            Mutex mutex;
+            try
+            {
+                mutex = new Mutex(false, MutexName);
+                bool got;
+                try { got = mutex.WaitOne(Has(args, "--wait-mutex") ? 15000 : 0); }
+                catch (AbandonedMutexException) { got = true; }
+                if (!got) return 0;
+            }
+            catch (UnauthorizedAccessException) { return 0; }   // an elevated instance owns it
+
+            // Elevated: let Explorer's TaskbarCreated through UIPI so the tray icon comes back after an Explorer restart
+            if (IsAdmin) ChangeWindowMessageFilter(RegisterWindowMessage("TaskbarCreated"), 1 /*MSGFLT_ADD*/);
+
+            Application.Run(new TrayApp());
+            GC.KeepAlive(mutex);
+            return 0;
+        }
+
+        // ---------------------------------------------------------------- CLI
+        [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+        [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+
+        static string OutFile(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals("--out", StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+            return null;
+        }
+
+        static int Emit(StringBuilder sb, string outFile, int rc)
+        {
+            try
+            {
+                if (outFile != null) File.WriteAllText(outFile, sb.ToString(), Encoding.UTF8);
+                else
+                {
+                    if (GetStdHandle(-11) == IntPtr.Zero) AttachConsole(-1);
+                    Console.Write(sb.ToString());
+                }
+            }
+            catch { rc = rc == 0 ? 2 : rc; }
+            return rc;
+        }
+
+        static int Cli(string[] args)
+        {
+            var sb = new StringBuilder();
+            int rc = 0;
+            try
+            {
+                switch (args[0].ToLowerInvariant())
+                {
+                    case "--power":
+                        var m = (args.Length > 1 ? args[1].ToLowerInvariant() : "") switch
+                        {
+                            "saver" or "quiet" or "省电" => PowerMode.Saver,
+                            "auto" or "intelligent" or "智能" => PowerMode.Auto,
+                            "perf" or "performance" or "性能" => PowerMode.Performance,
+                            "geek" or "极客" => PowerMode.Geek,
+                            _ => throw new ArgumentException("用法: TBMini --power saver|auto|perf|geek"),
+                        };
+                        Its.Set(m);
+                        sb.AppendLine("power=" + Its.Name(Its.Read()));
+                        break;
+
+                    case "--status":
+                        sb.AppendLine("power=" + Its.Name(Its.Read()) + "  (its_supported=" + Its.Supported + ")");
+                        sb.AppendLine("ac=" + Its.OnAC + "  geek_supported=" + Its.GeekSupported + "  geek_greyed=" + Its.GeekGreyed);
+                        sb.AppendLine("panel_on_dgpu=" + (Gpu.InternalPanelOnDgpu()?.ToString() ?? "unknown"));
+                        if (IsAdmin)
+                        {
+                            var s = Gpu.Snapshot();
+                            sb.AppendLine("bios_staged=" + s.Staged + "  running=" + s.Running + "  pending_reboot=" + s.PendingReboot);
+                            try { sb.AppendLine("bios_selections=" + string.Join(" | ", Gpu.BiosGraphicsSelections())); }
+                            catch (Exception e) { sb.AppendLine("bios_selections=ERR " + e.Message); }
+                            sb.AppendLine("igpu_supported=" + Gpu.IgpuSupported() + "  igpu_status=" + s.Igpu);
+                            sb.AppendLine("gpu_mode=" + Gpu.Name(s.Mode));
+                            sb.AppendLine("dgpu_present=" + Gpu.DgpuPresent());
+                            try { sb.AppendLine("bios_password=" + Gpu.SupervisorPasswordSet()); } catch (Exception e) { sb.AppendLine("bios_password=ERR " + e.Message); }
+                            sb.AppendLine("bitlocker=" + Gpu.SystemDriveBitLocker());
+                        }
+                        else sb.AppendLine("gpu: (BIOS 设置需要管理员权限读取)");
+                        sb.AppendLine("after_boot_igpu=" + AfterBoot.Load());
+                        break;
+
+                    case "--features":   // read every feature (read-only)
+                        foreach (var f in FeatureRegistry.All)
+                        {
+                            var sw = Stopwatch.StartNew();
+                            string val;
+                            try { int v = f.Read(); val = v >= 0 && v < f.Options.Length ? $"{v} ({f.Options[v]})" : v.ToString(); }
+                            catch (NotSupportedException e) { val = "unsupported: " + e.Message; }
+                            catch (Exception e) { val = "ERR " + e.GetType().Name + ": " + e.Message; }
+                            sb.AppendLine($"{f.Id,-9} {f.Section}/{f.Label} = {val}   [{string.Join("|", f.Options)}]  {sw.ElapsedMilliseconds} ms");
+                        }
+                        break;
+
+                    case "--autostart":
+                        string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+                        if (sub == "on") sb.AppendLine(TrayApp.EnableAutostart());
+                        else if (sub == "off") sb.AppendLine(TrayApp.DisableAutostart());
+                        sb.AppendLine("autostart=" + TrayApp.AutostartEnabled() + "  installed=" + File.Exists(TrayApp.InstalledExe));
+                        break;
+
+                    case "--version":
+                        sb.AppendLine("TBMini " + Version);
+                        break;
+
+                    default:
+                        sb.AppendLine("TBMini " + Version);
+                        sb.AppendLine("TBMini                                  托盘模式（自动请求管理员权限）");
+                        sb.AppendLine("TBMini --status [--out file]            当前状态（只读）");
+                        sb.AppendLine("TBMini --features [--out file]          所有设置项的当前值（只读）");
+                        sb.AppendLine("TBMini --power saver|auto|perf|geek     切换性能模式");
+                        sb.AppendLine("TBMini --autostart on|off|status        开机自启（需要管理员）");
+                        break;
+                }
+            }
+            catch (Exception e)
+            {
+                sb.AppendLine("ERROR: " + e.Message);
+                rc = 1;
+            }
+            return Emit(sb, OutFile(args), rc);
+        }
+    }
+}
