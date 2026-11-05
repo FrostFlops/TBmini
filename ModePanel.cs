@@ -105,6 +105,10 @@ namespace TBMini
         readonly Metric _mCpu, _mGpu, _mTotal;
         readonly Timer _sensorTimer = new Timer { Interval = 1500 };
         bool _sensing;
+        readonly Timer _anim = new Timer { Interval = 10 };   // pop-up: short slide + fade
+        int _animFrom, _animTo, _animStart;
+        const int AnimMs = 170;
+        IntPtr _powerNotify;
         readonly Label _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
         readonly Tile[] _pt = new Tile[4];
@@ -126,7 +130,7 @@ namespace TBMini
         }
 
         int S(float v) => (int)Math.Round(v * _s);
-        const int ColW = 340, Pad = 16, Gap = 12, RowH = 40, TileH = 62;
+        const int ColW = 370, Pad = 16, Gap = 12, RowH = 40, TileH = 62;
 
         public ModePanel(TrayApp app)
         {
@@ -155,10 +159,14 @@ namespace TBMini
             _chipGpu = new Chip { Font = _small, Ui = _s, Glyph = Glyph.Chip };
             Controls.AddRange(new Control[] { _hTitle, _chipPower, _chipGpu });
             _mCpu = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Chip, Label = "CPU", Warm = 80, Hot = 95 };
-            _mGpu = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Game, Label = "GPU", Warm = 75, Hot = 87 };
+            _mGpu = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Game, Label = "GPU", Warm = 75, Hot = 87, ReserveTemp = true };
             _mTotal = new Metric { Font = _small, ValueFont = _value, Ui = _s, Glyph = Glyph.Bolt };
             Controls.AddRange(new Control[] { _mCpu, _mGpu, _mTotal });
+            // with PawnIO usable, the CPU temperature will arrive: lay the header out for it from the start
+            _mCpu.ReserveTemp = Program.IsAdmin && Sensors.PawnIOInstalled;
             _sensorTimer.Tick += (s, e) => PollSensors();
+            _anim.Tick += (s, e) => AnimStep();
+            SystemEvents.SessionSwitch += OnSessionSwitch;
 
             _secPerf = SectionLabel("");
             _cardPerf = new Card { Ui = _s };
@@ -207,10 +215,13 @@ namespace TBMini
             _tip.SetToolTip(_gt[1], T("集显：混合模式下关掉独显，不用重启；独显被占用时不会生效",
                                       "iGPU only: turns the dGPU off within Hybrid, no restart; does not apply while an app is using the dGPU"));
             _tip.SetToolTip(_gt[2], T("独显直连：内屏直接接独显（MUX），需要重启", "dGPU direct: the display is wired straight to the dGPU (MUX); needs a restart"));
-            _tip.SetToolTip(_mCpu, T("CPU 封装功耗（RAPL）。固件提供 CPU 温度时也会显示",
-                                     "CPU package power (RAPL). The temperature is shown too where the firmware reports it"));
+            _tip.SetToolTip(_mCpu, T("CPU 封装温度和功耗。温度通过 PawnIO 驱动读取（需安装 PawnIO 并以管理员身份运行）",
+                                     "CPU package temperature and power. The temperature is read through the PawnIO driver (needs PawnIO and administrator rights)"));
             _tip.SetToolTip(_mGpu, T("独显温度和功耗（NVIDIA 驱动）。独显休眠时不读取，以免把它唤醒",
                                      "dGPU temperature and power (NVIDIA driver). Not read while the dGPU sleeps, so it is never woken up"));
+            _mGpu.Templates = new[] { "188 W", T("休眠", "Asleep"), T("已断开", "Off") };
+            if (_last == null) _mTotal.Label = T("整机", "System");
+            else _mTotal.Label = _last.Total == TotalSource.CpuGpu ? "CPU+GPU" : T("整机", "System");
             _link.Text = T("立即重启", "Restart now");
             _totalTip = null;
         }
@@ -240,7 +251,58 @@ namespace TBMini
         {
             base.OnVisibleChanged(e);
             if (Visible) { Sensors.Begin(); _sensorTimer.Start(); PollSensors(); }
-            else { _sensorTimer.Stop(); Sensors.End(); }
+            else
+            {
+                _sensorTimer.Stop(); Sensors.End();
+                _chargeW = double.NaN;          // stale once hidden; the next poll brings a fresh value
+                if (_anim.Enabled) { _anim.Stop(); Top = _animTo; }
+                if (Opacity < 1) Opacity = 1;
+            }
+        }
+
+        void HideNow()
+        {
+            if (!Visible) return;
+            HiddenAt = Environment.TickCount;
+            Hide();
+        }
+
+        // Never leave the monitor running unattended: hide on lock, on display off and before sleep.
+        void OnSessionSwitch(object s, SessionSwitchEventArgs e)
+        {
+            if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect)
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(HideNow));
+        }
+
+        static Guid DisplayStatusGuid = new Guid("2B84C20E-AD23-4ddf-93DB-05FFBD7EFCA5");   // GUID_SESSION_DISPLAY_STATUS
+        [DllImport("user32.dll")] static extern IntPtr RegisterPowerSettingNotification(IntPtr h, ref Guid setting, int flags);
+        [DllImport("user32.dll")] static extern bool UnregisterPowerSettingNotification(IntPtr h);
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_POWERBROADCAST = 0x218, PBT_APMSUSPEND = 0x4, PBT_POWERSETTINGCHANGE = 0x8013;
+            if (m.Msg == WM_POWERBROADCAST)
+            {
+                int ev = (int)(long)m.WParam;
+                if (ev == PBT_APMSUSPEND) HideNow();
+                else if (ev == PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero
+                         && Marshal.PtrToStructure<Guid>(m.LParam) == DisplayStatusGuid
+                         && Marshal.ReadInt32(m.LParam, 20) == 0)      // POWERBROADCAST_SETTING.Data: 0 = display off
+                    HideNow();
+            }
+            base.WndProc(ref m);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            if (_powerNotify != IntPtr.Zero) { UnregisterPowerSettingNotification(_powerNotify); _powerNotify = IntPtr.Zero; }
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { SystemEvents.SessionSwitch -= OnSessionSwitch; _anim.Dispose(); _sensorTimer.Dispose(); }
+            base.Dispose(disposing);
         }
 
         void PollSensors()
@@ -256,11 +318,38 @@ namespace TBMini
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        double _chargeW = double.NaN;   // battery charge rate from the last poll (only while the panel is open)
+
+        /// "接电源 · 82% · +45 W" while charging, "接电源 · 100%" when full or held, "电池 · 85%" on battery.
+        /// Returns true when the chip's width changed.
+        bool UpdatePowerChip()
+        {
+            var ps = SystemInformation.PowerStatus;
+            bool ac = _app.OnAc;
+            string pct = ps.BatteryLifePercent <= 1f ? $"{(int)Math.Round(ps.BatteryLifePercent * 100)}%" : "";
+            string text = (ac ? T("接电源", "AC") : T("电池", "Battery")) + (pct != "" ? " · " + pct : "");
+            bool charging = ac && !double.IsNaN(_chargeW) && _chargeW >= 0.5;
+            if (charging) text += " · +" + (_chargeW < 10 ? $"{_chargeW:0.0}" : $"{_chargeW:0}") + " W";
+            string glyph = ac ? Glyph.Charging : Glyph.BatteryLevel(ps.BatteryLifePercent);
+            string tip = charging ? T("正在充电：+W 是充进电池的功率，不是整机功耗", "Charging: +W is the power going into the battery, not the laptop's total draw") : null;
+            if (tip != _powerTip) { _powerTip = tip; _tip.SetToolTip(_chipPower, tip); }
+            if (text == _chipPower.Text && glyph == _chipPower.Glyph) return false;
+            int before = _chipPower.PreferredWidth;
+            _chipPower.Text = text; _chipPower.Glyph = glyph;
+            _chipPower.Invalidate();
+            return _chipPower.PreferredWidth != before;
+        }
+
+        string _powerTip;
+
         static string Deg(double v) => double.IsNaN(v) ? "" : $"{v:0}°C";
         static string Watt(double v) => double.IsNaN(v) ? "—" : v < 10 ? $"{v:0.0} W" : $"{v:0} W";
 
         void ShowSensors(SensorData d)
         {
+            bool relayout = false;
+            // reserve room for a temperature once one has been seen, so the bubbles do not change width every tick
+            if (!double.IsNaN(d.CpuTemp) && !_mCpu.ReserveTemp) { _mCpu.ReserveTemp = true; relayout = true; }
             _mCpu.Set(d.CpuTemp, Deg(d.CpuTemp), Watt(d.CpuW), false);
             switch (d.Gpu)
             {
@@ -269,15 +358,25 @@ namespace TBMini
                 case GpuPower.Off: _mGpu.Set(double.NaN, "", T("已断开", "Off"), true); break;
                 default: _mGpu.Set(double.NaN, "", "—", true); break;
             }
-            bool battery = d.TotalIsBattery || !_app.OnAc;
-            string label = battery ? T("整机", "System") : "CPU+GPU";
-            if (_mTotal.Label != label) { _mTotal.Label = label; _mTotal.Invalidate(); }
+            if (d.Total != TotalSource.None)
+            {
+                string label = d.Total == TotalSource.CpuGpu ? "CPU+GPU" : T("整机", "System");
+                if (_mTotal.Label != label) { _mTotal.Label = label; _mTotal.Invalidate(); relayout = true; }
+            }
             _mTotal.Set(double.NaN, "", Watt(d.TotalW), false);
-            string tip = battery
-                ? T("整机功耗（电池放电功率）", "Whole-system power (battery discharge rate)")
-                : T("接电源时没有整机功率计，这里是 CPU 与独显功耗之和。拔掉电源后显示整机功耗。",
-                    "On AC there is no whole-system power meter, so this is CPU plus dGPU power. Unplug to see whole-system power.");
+            _chargeW = d.ChargeW;
+            if (UpdatePowerChip()) relayout = true;
+            string tip = (d.Total switch
+            {
+                TotalSource.Platform => T("整机功耗：CPU 的平台能量计数器（PSys），通过 PawnIO 读取",
+                                          "Whole-system power: the CPU's platform energy counter (PSys), read through PawnIO"),
+                TotalSource.Battery => T("整机功耗（电池放电功率）", "Whole-system power (battery discharge rate)"),
+                TotalSource.CpuGpu => T("接电源时读不到整机功耗（需要 PawnIO，且主板接了 PSys），这里是 CPU 与独显功耗之和。拔掉电源后显示整机功耗。",
+                                        "Whole-system power is not readable on AC here (needs PawnIO and a board that wires up PSys), so this is CPU plus dGPU power. Unplug to see whole-system power."),
+                _ => T("整机功耗", "Whole-system power"),
+            });
             if (tip != _totalTip) { _totalTip = tip; _tip.SetToolTip(_mTotal, tip); }   // re-setting resets a showing tooltip
+            if (relayout) LayoutHeader();
         }
 
         Label SectionLabel(string text) => new Label { Text = text, Font = _sec, AutoSize = true };
@@ -306,7 +405,12 @@ namespace TBMini
             DwmSetWindowAttribute(Handle, 34 /*BORDER_COLOR*/, ref border, 4);
         }
 
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); ApplyDwm(); }
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyDwm();
+            _powerNotify = RegisterPowerSettingNotification(Handle, ref DisplayStatusGuid, 0 /*DEVICE_NOTIFY_WINDOW_HANDLE*/);
+        }
 
         // ------------------------------------------------------------------ feature rows
         Row EnsureRow(Feature f)
@@ -390,21 +494,14 @@ namespace TBMini
             int pad = S(Pad), colW = S(ColW), gap = S(Gap);
             int x0 = pad, x1 = pad + colW + gap;
 
-            // header
-            _hTitle.Location = new Point(x0 - S(1), S(12));
-            int chipH = S(26), cy = S(14);
-            _chipGpu.Size = new Size(_chipGpu.PreferredWidth, chipH);
-            _chipPower.Size = new Size(_chipPower.PreferredWidth, chipH);
-            _chipGpu.Location = new Point(Width - pad - _chipGpu.Width, cy);
-            _chipPower.Location = new Point(_chipGpu.Left - S(8) - _chipPower.Width, cy);
-            int mGap = S(8), mW = (Width - 2 * pad - 2 * mGap) / 3, mY = S(50), mH = S(32);
-            _mCpu.Bounds = new Rectangle(x0, mY, mW, mH);
-            _mGpu.Bounds = new Rectangle(x0 + mW + mGap, mY, mW, mH);
-            _mTotal.Bounds = new Rectangle(Width - pad - mW, mY, mW, mH);
-            int top = mY + mH + S(14);
+            // header: title, live readings and status chips share one row
+            LayoutHeader();
+            int top = HeaderY + S(HeaderH) + S(16);
 
             // left column: modes
             int yL = top;
+            var colL = new List<(Control label, Control card)> { (_secPerf, _cardPerf), (_secGpu, _cardGpu) };
+            var colR = new List<(Control label, Control card)>();
             yL = PlaceTiles(_secPerf, _cardPerf, _pt, x0, yL, colW);
             yL = PlaceTiles(_secGpu, _cardGpu, _gt, x0, yL, colW);
             int yR = top;
@@ -442,25 +539,87 @@ namespace TBMini
                 }
                 sec.card.Dividers = dividers.ToArray();
                 sec.card.Invalidate();
+                (left ? colL : colR).Add((sec.label, sec.card));
                 y = sec.card.Bottom + S(14);
                 if (left) yL = y; else yR = y;
             }
 
-            int bottom = Math.Max(yL, yR);
+            AlignLastSections(colL, colR);
+            int bottom = colL.Concat(colR).Select(c => c.card.Bottom).DefaultIfEmpty(top).Max() + S(14);
             _status.Bounds = new Rectangle(x0 + S(2), bottom - S(4), Width - 2 * pad, S(22));
             int h = _status.Bottom + S(10);
 
-            var wa = Screen.FromPoint(Visible ? Location : Cursor.Position).WorkingArea;
+            // during the slide-in the window is briefly outside its target (possibly over a monitor above): use the target
+            var wa = Screen.FromPoint(Visible ? new Point(Left, _anim.Enabled ? _animTo : Top) : Cursor.Position).WorkingArea;
             int max = wa.Height - S(16);
             if (h > max) { AutoScroll = true; AutoScrollMinSize = new Size(0, h); Height = max; }
             else { AutoScroll = false; Height = h; }
             if (Visible)
             {
                 int m = S(8);
-                int t = _anchorBottom ? wa.Bottom - m - Height : Math.Min(Top, wa.Bottom - m - Height);
-                Top = Math.Max(wa.Top + m, t);
+                int cur = _anim.Enabled ? _animTo : Top;
+                int t = _anchorBottom ? wa.Bottom - m - Height : Math.Min(cur, wa.Bottom - m - Height);
+                t = Math.Max(wa.Top + m, t);
+                if (_anim.Enabled) { _animFrom += t - _animTo; _animTo = t; } else Top = t;
             }
             Invalidate();
+        }
+
+        /// The last section of each column starts on the same line (e.g. 应用 and 声音, both two rows), so the
+        /// columns also end together; the shorter column's extra space is spread evenly over its section gaps.
+        static void AlignLastSections(List<(Control label, Control card)> a, List<(Control label, Control card)> b)
+        {
+            if (a.Count < 2 || b.Count < 2) return;
+            int ta = a[a.Count - 1].label.Top, tb = b[b.Count - 1].label.Top;
+            if (ta == tb) return;
+            var shorter = ta < tb ? a : b;
+            int extra = Math.Abs(ta - tb), n = shorter.Count - 1;
+            for (int i = 1; i <= n; i++)
+            {
+                int dy = extra * i / n;
+                shorter[i].label.Top += dy;
+                shorter[i].card.Top += dy;
+            }
+        }
+
+        const int HeaderH = 26;
+        int HeaderY => S(14);
+
+        /// Header row, right to left: GPU-mode chip, power chip, total, GPU and CPU readings, then the title.
+        /// If it does not fit (long English texts, large fonts), the title goes first (the reading labels carry
+        /// meaning, e.g. "CPU+GPU" vs whole system), then the labels.
+        void LayoutHeader()
+        {
+            int pad = S(Pad), h = S(HeaderH), cy = HeaderY, g = S(6);
+            _chipGpu.Size = new Size(_chipGpu.PreferredWidth, h);
+            _chipPower.Size = new Size(_chipPower.PreferredWidth, h);
+            _chipGpu.Location = new Point(Width - pad - _chipGpu.Width, cy);
+            _chipPower.Location = new Point(_chipGpu.Left - g - _chipPower.Width, cy);
+
+            var ms = new[] { _mCpu, _mGpu, _mTotal };
+            int Need(bool labels)
+            {
+                foreach (var m in ms) m.ShowLabel = labels;
+                return ms.Sum(m => m.PreferredWidth) + g * (ms.Length - 1);
+            }
+            int right = _chipPower.Left - g;
+            int withTitle = right - (pad + _hTitle.PreferredSize.Width + S(10)), noTitle = right - pad;
+            bool title;
+            if (Need(true) <= withTitle) title = true;
+            else if (Need(true) <= noTitle) title = false;
+            else title = Need(false) <= withTitle;
+            // without the title, the readings share the leftover width so the row spans the panel evenly
+            int spare = title ? 0 : Math.Max(0, noTitle - (ms.Sum(m => m.PreferredWidth) + g * (ms.Length - 1)));
+            int x = right;
+            for (int i = ms.Length - 1; i >= 0; i--)
+            {
+                int w = ms[i].PreferredWidth + spare / ms.Length + (i == 0 ? spare % ms.Length : 0);
+                ms[i].Bounds = new Rectangle(x - w, cy, w, h);
+                ms[i].Invalidate();
+                x -= w + g;
+            }
+            _hTitle.Visible = title;
+            _hTitle.Location = new Point(pad - S(1), cy + (h - _hTitle.PreferredSize.Height) / 2);
         }
 
         int PlaceTiles(Label sec, Card card, Tile[] tiles, int x, int y, int w)
@@ -529,11 +688,7 @@ namespace TBMini
             }
 
             // header chips
-            var ps = SystemInformation.PowerStatus;
-            bool ac = _app.OnAc;
-            string pct = ps.BatteryLifePercent <= 1f ? $"{(int)Math.Round(ps.BatteryLifePercent * 100)}%" : "";
-            _chipPower.Glyph = ac ? Glyph.Charging : Glyph.BatteryLevel(ps.BatteryLifePercent);
-            _chipPower.Text = (ac ? T("接电源", "On AC") : T("电池", "Battery")) + (pct != "" ? " · " + pct : "");
+            UpdatePowerChip();
             string pend = _app.PendingText();
             _chipGpu.Text = _app.GpuText() + (pend != null ? " → " + pend : "");
             int gIdx = Array.IndexOf(GpuModes, gi.Mode);
@@ -562,12 +717,7 @@ namespace TBMini
                 r.Ctl.Invalidate();
             }
             if (layout) Relayout();
-            else
-            {   // chips may have changed width
-                int pad = S(Pad);
-                _chipGpu.Width = _chipGpu.PreferredWidth; _chipPower.Width = _chipPower.PreferredWidth;
-                _chipGpu.Left = Width - pad - _chipGpu.Width; _chipPower.Left = _chipGpu.Left - S(8) - _chipPower.Width;
-            }
+            else LayoutHeader();   // chips may have changed width
 
             string line = "";
             if (!Its.Supported) line = T("没找到联想 ITS 服务，性能模式不可用", "Lenovo ITS service not found; performance modes are unavailable");
@@ -600,14 +750,41 @@ namespace TBMini
             int m = S(8);
             int x = Math.Max(wa.Left + m, Math.Min(c.X - Width / 2, wa.Right - Width - m));
             _anchorBottom = c.Y >= wa.Top + wa.Height / 2;
-            int y = _anchorBottom ? wa.Bottom - Height - m : wa.Top + m;
-            Location = new Point(x, Math.Max(wa.Top + m, y));
+            int y = Math.Max(wa.Top + m, _anchorBottom ? wa.Bottom - Height - m : wa.Top + m);
+            if (AnimationsEnabled())
+            {   // rise from the taskbar side and fade in, like the Windows 11 flyouts
+                _animTo = y;
+                _animFrom = y + (_anchorBottom ? S(16) : -S(16));
+                Opacity = 0;
+                Location = new Point(x, _animFrom);
+                _animStart = Environment.TickCount;
+                _anim.Start();
+            }
+            else Location = new Point(x, y);
             Show();
             Activate();
             SetForegroundWindow(Handle);
         }
 
+        void AnimStep()
+        {
+            double t = Math.Min(1.0, (Environment.TickCount - _animStart) / (double)AnimMs);
+            double e = 1 - Math.Pow(1 - t, 3);                      // ease-out cubic
+            Top = (int)Math.Round(_animFrom + (_animTo - _animFrom) * e);
+            if (t >= 1) { _anim.Stop(); Top = _animTo; Opacity = 1; }   // back to a normal (non-layered) window
+            else Opacity = Math.Max(0.01, e);
+        }
+
+        /// Honours "Animation effects" in Windows settings (SPI_GETCLIENTAREAANIMATION).
+        static bool AnimationsEnabled()
+        {
+            bool on = true;
+            try { SystemParametersInfo(0x1042, 0, ref on, 0); } catch { }
+            return on;
+        }
+
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint param, ref bool value, uint winIni);
 
 #if TBMINI_DEV
         /// Test hook: draw the panel (current state) into a PNG without showing it on screen.
@@ -622,7 +799,13 @@ namespace TBMini
             Sensors.Begin();
             Sensors.Read();
             System.Threading.Thread.Sleep(1000);
-            ShowSensors(Sensors.Read());
+            var d = Sensors.Read();
+            if (Environment.GetEnvironmentVariable("TBMINI_FAKE_TEMPS") == "1")   // layout preview of the admin+PawnIO state
+            {
+                if (double.IsNaN(d.CpuTemp)) d.CpuTemp = 67;
+                if (double.IsNaN(d.ChargeW)) d.ChargeW = 45;
+            }
+            ShowSensors(d);
             Application.DoEvents();
             using var bmp = new Bitmap(Width, Height);
             DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height));
@@ -848,14 +1031,36 @@ namespace TBMini
     }
 
     /// Header bubble with a live reading: glyph, label, then temperature and power right-aligned.
+    /// Same height and outline as the status chips; its width comes from templates, not the live text,
+    /// so it does not jitter as the numbers change.
     sealed class Metric : Owner
     {
         public string Glyph = "", Label = "", Temp = "", Value = "—";
         public Font ValueFont;
         public double Warm = 80, Hot = 95, TempC = double.NaN;
-        public bool Muted;
+        public bool Muted, ShowLabel = true;
+        public bool ReserveTemp;                       // keep room for a temperature
+        public string[] Templates = { "188 W" };       // widest value texts expected
+
+        const TextFormatFlags F = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
 
         public Metric() { Cursor = Cursors.Default; }
+
+        int Measure(string s, Font f) => TextRenderer.MeasureText(s, f, Size.Empty, F).Width;
+
+        public int PreferredWidth
+        {
+            get
+            {
+                var vf = ValueFont ?? Font;
+                int w = S(8) + S(14) + S(5);
+                if (ShowLabel && Label != "") w += Measure(Label, Font) + S(8);
+                if (ReserveTemp) w += Measure("88°C", vf) + S(5);
+                int vw = Measure(Value, vf);
+                foreach (var t in Templates) vw = Math.Max(vw, Measure(t, vf));
+                return w + vw + S(10);
+            }
+        }
 
         public void Set(double tempC, string temp, string value, bool muted)
         {
@@ -878,17 +1083,17 @@ namespace TBMini
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             Fill(g, r, r.Height / 2f, T.Card);
             Stroke(g, r, r.Height / 2f, T.CardBorder);
-            DrawGlyph(g, Glyph, 14, new Rectangle(S(11), 0, S(18), Height), T.Accent);
-            const TextFormatFlags F = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
-            TextRenderer.DrawText(g, Label, Font, new Rectangle(S(34), 0, Width / 2, Height), T.Sub, F | TextFormatFlags.Left);
+            DrawGlyph(g, Glyph, 13, new Rectangle(S(7), 0, S(16), Height), T.Accent);
+            if (ShowLabel && Label != "")
+                TextRenderer.DrawText(g, Label, Font, new Rectangle(S(27), 0, Width, Height), T.Sub, F | TextFormatFlags.Left);
             var vf = ValueFont ?? Font;
-            int right = Width - S(14);
+            int right = Width - S(10);
             int vw = TextRenderer.MeasureText(g, Value, vf, Size.Empty, F).Width;
             TextRenderer.DrawText(g, Value, vf, new Rectangle(right - vw, 0, vw + S(2), Height), Muted ? T.Sub : T.Fg, F | TextFormatFlags.Left);
             if (Temp != "")
             {
                 int tw = TextRenderer.MeasureText(g, Temp, vf, Size.Empty, F).Width;
-                TextRenderer.DrawText(g, Temp, vf, new Rectangle(right - vw - S(12) - tw, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
+                TextRenderer.DrawText(g, Temp, vf, new Rectangle(right - vw - S(5) - tw, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
             }
         }
     }

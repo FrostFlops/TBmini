@@ -183,7 +183,8 @@ namespace TBMini
                         Sensors.Release();
                         sb.AppendLine("cpu_temp_c=" + Sensors.Fmt(r.CpuTemp) + "  cpu_w=" + Sensors.Fmt(r.CpuW, 1));
                         sb.AppendLine("gpu=" + r.Gpu + "  gpu_temp_c=" + Sensors.Fmt(r.GpuTemp) + "  gpu_w=" + Sensors.Fmt(r.GpuW, 1));
-                        sb.AppendLine("total_w=" + Sensors.Fmt(r.TotalW, 1) + "  (" + (r.TotalIsBattery ? "battery discharge" : "cpu+gpu, on AC") + ")");
+                        sb.AppendLine("total_w=" + Sensors.Fmt(r.TotalW, 1) + "  source=" + r.Total + "  charge_w=" + Sensors.Fmt(r.ChargeW, 1));
+                        sb.AppendLine("pawnio_installed=" + Sensors.PawnIOInstalled + "  admin=" + IsAdmin);
                         break;
 
                     case "--autostart":

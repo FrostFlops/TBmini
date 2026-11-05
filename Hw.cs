@@ -588,24 +588,10 @@ namespace TBMini
     }
 
     // =============================================================================================
-    // Mic noise suppression (Elevoc via Lenovo SENoiseCancellingPlugin64.dll). The plugin is a non-unloadable
-    // singleton, so it runs in a short-lived child process: TBMini.exe --nc get|set N
+    // Authenticode check for third-party DLLs TBMini loads while elevated
     // =============================================================================================
-    public static class MicNoise
+    public static class Trust
     {
-        public static string[] BaseLabels => Zh ? new[] { "关", "多人", "单人", "空间" } : new[] { "Off", "Group", "Single", "Spatial" };
-        public static readonly int[] BaseModes = { 0, 1, 2, 3 };
-
-        public static string AddinDir()
-        {
-            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"Lenovo\Vantage\Addins\SmartNoiseCancelledAddin");
-            if (!Directory.Exists(root)) return null;
-            return Directory.GetDirectories(root)
-                .Where(d => File.Exists(Path.Combine(d, "SENoiseCancellingPlugin64.dll")))
-                .OrderByDescending(d => Version.TryParse(Path.GetFileName(d), out var v) ? v : new Version(0, 0))
-                .FirstOrDefault();
-        }
-
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         struct WINTRUST_FILE_INFO { public uint cbStruct; public string pcwszFilePath; public IntPtr hFile; public IntPtr pgKnownSubject; }
 
@@ -620,9 +606,10 @@ namespace TBMini
         [DllImport("wintrust.dll", CharSet = CharSet.Unicode)]
         static extern int WinVerifyTrust(IntPtr hwnd, ref Guid action, ref WINTRUST_DATA data);
 
-        /// The plugin must carry a valid Authenticode signature (file digest verified by WinVerifyTrust) whose signer
-        /// organisation is Lenovo — we may be running elevated.
-        static bool SignedByLenovo(string file)
+        /// True when the file has a valid Authenticode signature (digest verified by WinVerifyTrust) and the signer's
+        /// subject contains the RDN <paramref name="subjectRdn"/> (e.g. "O=Lenovo"), or its simple name starts with
+        /// <paramref name="namePrefix"/> when given.
+        public static bool IsSignedBy(string file, string subjectRdn, string namePrefix = null)
         {
             var fi = new WINTRUST_FILE_INFO { cbStruct = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(), pcwszFilePath = file };
             IntPtr pFi = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
@@ -646,13 +633,36 @@ namespace TBMini
                 if (rc != 0) return false;
 
                 using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(file));
-                string org = cert.GetNameInfo(X509NameType.SimpleName, false) ?? "";
-                return cert.Subject.Split(',').Select(p => p.Trim())
-                    .Any(p => p.StartsWith("O=Lenovo", StringComparison.OrdinalIgnoreCase)) || org.StartsWith("Lenovo", StringComparison.OrdinalIgnoreCase);
+                string name = cert.GetNameInfo(X509NameType.SimpleName, false) ?? "";
+                return cert.Subject.Split(',').Select(p => p.Trim()).Any(p => p.StartsWith(subjectRdn, StringComparison.OrdinalIgnoreCase))
+                    || (namePrefix != null && name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase));
             }
             catch { return false; }
             finally { Marshal.FreeHGlobal(pFi); }
         }
+    }
+
+    // =============================================================================================
+    // Mic noise suppression (Elevoc via Lenovo SENoiseCancellingPlugin64.dll). The plugin is a non-unloadable
+    // singleton, so it runs in a short-lived child process: TBMini.exe --nc get|set N
+    // =============================================================================================
+    public static class MicNoise
+    {
+        public static string[] BaseLabels => Zh ? new[] { "关", "多人", "单人", "空间" } : new[] { "Off", "Group", "Single", "Spatial" };
+        public static readonly int[] BaseModes = { 0, 1, 2, 3 };
+
+        public static string AddinDir()
+        {
+            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"Lenovo\Vantage\Addins\SmartNoiseCancelledAddin");
+            if (!Directory.Exists(root)) return null;
+            return Directory.GetDirectories(root)
+                .Where(d => File.Exists(Path.Combine(d, "SENoiseCancellingPlugin64.dll")))
+                .OrderByDescending(d => Version.TryParse(Path.GetFileName(d), out var v) ? v : new Version(0, 0))
+                .FirstOrDefault();
+        }
+
+        /// The plugin must carry a valid Authenticode signature whose signer organisation is Lenovo — we may be running elevated.
+        static bool SignedByLenovo(string file) => Trust.IsSignedBy(file, "O=Lenovo", "Lenovo");
 
         /// Runs the helper and returns the plugin's JSON.
         public static string Helper(string args)

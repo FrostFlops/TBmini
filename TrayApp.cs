@@ -676,6 +676,7 @@ namespace TBMini
         internal void RefreshForRender() => RefreshFeatures();
         internal void RenderPanelTo(string path) => _panel.RenderTo(path);
         internal void ApplyLanguageForDev() => ApplyLanguage();
+        internal ModePanel PanelForDev => _panel;
 #endif
 
         void ShowPanel()
