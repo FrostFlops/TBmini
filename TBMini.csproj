@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>TBMini</AssemblyName>
     <RootNamespace>TBMini</RootNamespace>
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>TBMini</Product>
     <Description>ThinkBook 16p G6 performance / GPU mode switcher</Description>

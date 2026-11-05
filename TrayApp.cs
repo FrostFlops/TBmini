@@ -194,18 +194,16 @@ namespace TBMini
                 var ff = f;
                 Task.Run(() =>
                 {
-                    bool? sup; int v = -1; string unavailable = null;
+                    bool? sup; int v = -1;
                     try { v = ff.Read(); sup = true; }
                     catch (NotSupportedException) { sup = false; }
-                    catch (UnavailableException e) { sup = true; unavailable = e.Message; }
                     catch { sup = st.Supported ?? true; }
-                    return (sup, v, unavailable);
+                    return (sup, v);
                 }).ContinueWith(t =>
                 {
                     _reading.Remove(ff.Id);
-                    var (sup, v, unavailable) = t.Result;
+                    var (sup, v) = t.Result;
                     st.Supported = sup; if (sup == true) st.Value = v;
-                    st.Unavailable = unavailable;
                     _panel.UpdateView();
                 }, TaskScheduler.FromCurrentSynchronizationContext());
             }

@@ -18,7 +18,6 @@ namespace TBMini
         public bool? Supported;      // null = not read yet
         public int Value = -1;
         public bool Busy;
-        public string Unavailable;   // non-null: exists but not usable now (row disabled, this is the tooltip)
     }
 
     // ===================================================================================== theme
@@ -110,7 +109,7 @@ namespace TBMini
         bool _sensing;
         readonly Timer _anim = new Timer { Interval = 10 };   // pop-up: short slide + fade
         int _animFrom, _animTo, _animStart;
-        const int AnimMs = 280, AnimRise = 40;
+        const int AnimMs = 450, AnimRise = 56;
         IntPtr _powerNotify;
         readonly Label _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
@@ -130,7 +129,6 @@ namespace TBMini
             public Label Label;
             public Control Ctl;          // Toggle / Segmented / Drop
             public bool Shown;           // own flag: Control.Visible reads false while the form is hidden
-            public string TipNow;        // tooltip currently set on the row
         }
 
         int S(float v) => (int)Math.Round(v * _s);
@@ -439,7 +437,6 @@ namespace TBMini
         {
             var card = _sections[r.F.Section].card;
             if (r.Ctl != null) { _tip.SetToolTip(r.Ctl, null); card.Controls.Remove(r.Ctl); r.Ctl.Dispose(); }
-            r.TipNow = null;                 // the next UpdateView sets the right tooltip on the new control
             var f = r.F;
             if (f.Kind == FeatureKind.Toggle)
             {
@@ -732,20 +729,16 @@ namespace TBMini
                 var r = EnsureRow(f);
                 if (isNew || !r.Shown) layout = true;
                 bool wantSeg = f.Kind == FeatureKind.Choice && f.Options.Length <= 4;
-                if (f.Kind == FeatureKind.Choice && (wantSeg != (r.Ctl is Segmented) || (r.Ctl is Segmented sg0 && sg0.Options.Length != f.Options.Length)))
+                if (f.Kind == FeatureKind.Choice && (wantSeg != (r.Ctl is Segmented) || (r.Ctl is Segmented sg0 && !sg0.Options.SequenceEqual(f.Options))))
                 { BuildControl(r); ApplyTheme(); layout = true; }
 
-                bool usable = !st.Busy && st.Unavailable == null;
+                bool usable = !st.Busy;
                 switch (r.Ctl)
                 {
                     case Toggle t: t.On = st.Value == 1; t.Unknown = st.Value < 0; t.Enabled = usable; break;
                     case Segmented sg: sg.Selected = st.Value; sg.Enabled = usable; break;
                     case Drop d: d.Text = st.Value >= 0 && st.Value < f.Options.Length ? f.Options[st.Value] : "—"; d.Enabled = usable; break;
                 }
-                // exists but unusable right now (e.g. 超级分辨率 in dGPU direct): greyed out, the reason as tooltip
-                r.Label.ForeColor = st.Unavailable != null ? _t.Disabled : _t.Fg;
-                string tip = st.Unavailable ?? f.Tip;
-                if (tip != r.TipNow) { r.TipNow = tip; _tip.SetToolTip(r.Label, tip); _tip.SetToolTip(r.Ctl, tip); }
                 r.Ctl.Invalidate();
             }
             if (layout) Relayout();

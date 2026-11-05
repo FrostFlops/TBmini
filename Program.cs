@@ -170,7 +170,6 @@ namespace TBMini
                             string val;
                             try { int v = f.Read(); val = v >= 0 && v < f.Options.Length ? $"{v} ({f.Options[v]})" : v.ToString(); }
                             catch (NotSupportedException e) { val = "unsupported: " + e.Message; }
-                            catch (UnavailableException e) { val = "unavailable now: " + e.Message; }
                             catch (Exception e) { val = "ERR " + e.GetType().Name + ": " + e.Message; }
                             sb.AppendLine($"{f.Id,-9} {Sec.Title(f.Section)}/{f.Label} = {val}   [{string.Join("|", f.Options)}]  {sw.ElapsedMilliseconds} ms");
                         }

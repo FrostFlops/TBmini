@@ -26,13 +26,6 @@ namespace TBMini
         };
     }
 
-    /// Thrown by Feature.Read when the feature exists but cannot be used in the current state (the row is shown
-    /// disabled with the message as its tooltip), e.g. 超级分辨率 while the dGPU drives the display.
-    public sealed class UnavailableException : Exception
-    {
-        public UnavailableException(string reason) : base(reason) { }
-    }
-
     /// One setting row in the panel. Read/Write run on a background thread.
     /// Read() returns the option index (Toggle: 0 = off, 1 = on), -1 = unknown;
     /// it throws NotSupportedException when the feature does not exist on this machine (row is hidden).
@@ -312,14 +305,33 @@ namespace TBMini
                 ReadFn = ColorPreset.Read, WriteFn = ColorPreset.Write,
             });
 
-            L.Add(new DelegateFeature
+            // Always registered: options are re-probed on every read (the internal panel may be off at startup, e.g.
+            // lid closed on a dock), and each read/write works against the snapshot its options were built from.
+            var rr = new DelegateFeature
             {
-                Id = "sr", Section = Sec.Display, Label = T("超级分辨率", "Super resolution"),
-                Tip = T("Intel 核显的视频超分辨率：放大低分辨率视频时更清晰。只对核显播放的视频生效（混合 / 集显模式）",
-                        "Intel iGPU video super resolution: sharper upscaling of low-resolution video. Only affects video played on the iGPU (Hybrid / iGPU only)"),
-                ReadFn = IntelSr.Read,
-                WriteFn = v => { IntelSr.Write(v); Check(IntelSr.Read() == v, T("超级分辨率", "Super resolution")); },
-            });
+                Id = "refresh", Section = Sec.Display, Label = T("刷新率", "Refresh rate"), Kind = FeatureKind.Choice,
+                Options = RefreshRate.Probe()?.Options ?? new string[0],
+            };
+            RefreshRate.Snapshot shown = null;
+            string RateTip(RefreshRate.Snapshot s) => s != null && s.Dynamic
+                ? T($"内屏刷新率。「动态」= Windows 动态刷新率：平时 {RefreshRate.DynamicBase} Hz 省电，滚动、动画时自动升到 {s.Rates.Max()} Hz",
+                    $"Internal display refresh rate. Dynamic = Windows dynamic refresh rate: {RefreshRate.DynamicBase} Hz while idle to save power, up to {s.Rates.Max()} Hz while scrolling or animating")
+                : T("内屏刷新率", "Internal display refresh rate");
+            rr.Tip = RateTip(RefreshRate.Probe());
+            rr.ReadFn = () =>
+            {
+                var s = RefreshRate.Probe();
+                if (s == null || s.Options.Length < 2) throw new NotSupportedException(T("内屏未点亮", "internal display is off"));
+                rr.Options = s.Options; rr.Tip = RateTip(s); shown = s;
+                return RefreshRate.Read(s);
+            };
+            rr.WriteFn = i =>
+            {
+                var s = shown ?? RefreshRate.Probe() ?? throw new InvalidOperationException(T("内屏未点亮，无法设置刷新率", "The internal display is off; the refresh rate cannot be set"));
+                RefreshRate.Write(s, i);
+                Check(EnergyDrv.Poll(() => { try { return RefreshRate.Read(s) == i; } catch (NotSupportedException) { return false; } }), T("刷新率", "Refresh rate"));
+            };
+            L.Add(rr);
 
             L.Add(new DelegateFeature
             {

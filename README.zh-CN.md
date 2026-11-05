@@ -20,7 +20,7 @@
 | 电池 | 充电模式（普通 / 快充 / 养护）、夜间充电 |
 | 电源 | 持续 USB 供电（关 / 开 / 含电池关机）、开盖开机 |
 | 键盘 | 键盘背光（关 / 暗 / 亮 / 自动）、背光 30 秒自动关、记住背光设置、F1-F12 首行键（热键 / F1-F12）、Fn/Ctrl 交换、大写/数字锁定提示、触摸板开关 |
-| 显示 | 内屏出厂 X-Rite 色彩预设（D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709），切换显卡模式后会自动重新应用；Intel 视频超级分辨率（只在内屏由核显驱动时可用，独显直连时显示为灰色） |
+| 显示 | 内屏出厂 X-Rite 色彩预设（D65 / Native / sRGB / P3-D65 / P3-DCI / Adobe RGB / REC709），切换显卡模式后会自动重新应用；刷新率（60 / 120 / 165 Hz，或「动态」：Windows 11 动态刷新率，平时 60 Hz，滚动和动画时最高 165 Hz） |
 | 声音 | 杜比音效（动态 / 电影 / 音乐 / 游戏 / 语音 / 定制 / 关闭）、麦克风 AI 降噪（关 / 多人 / 单人 / 空间） |
 | 应用 | 界面语言（跟随系统 / 中文 / English）、开机自启 |
 
@@ -82,7 +82,7 @@ TBMini 本身不包含任何联想或 NVIDIA 的文件，它调用的是机器�
 - 独显温度和功耗：NVIDIA 驱动的 `nvml.dll`；CPU 功耗：Windows 自带的 Energy Meter 计数器；电池放电功率：Windows 的电池驱动
 - CPU 温度（可选）：[PawnIO](https://pawnio.eu) 驱动（需自行安装）。TBMini 内嵌 PawnIO 官方签名的 `IntelMSR` 模块，它只能读取固定的几项 CPU 寄存器（LGPL-2.1，见 [third_party/PawnIO](third_party/PawnIO)）；加载 PawnIO 的库之前会先校验其签名
 - 大写/数字锁定提示：`LenovoFnAndFunctionKeys` 服务
-- 超级分辨率：Intel 显卡控制库（`ControlLib.dll`，随 Intel 显卡驱动安装），与联想自带的超级分辨率开关调用的是同一个接口
+- 刷新率：Windows 自带的显示设置接口（固定刷新率用 `ChangeDisplaySettingsEx`，「动态」用 Windows 11 的 `DISPLAYCONFIG_PATH_BOOST_REFRESH_RATE` 路径标志），不依赖联想组件
 - 色彩模式：出厂预装的 X-Rite 校色文件（`C:\Windows\System32\spool\drivers\color\TPLCD_*.icm`）。开着 HDR 或「自动管理应用颜色」时预设不生效
 - 杜比音效：Dolby 音频驱动/服务，以及联想百应自带的 `DolbyRpcClient.dll`（开启「开机自启」时会复制一份到安装目录）
 - 麦克风降噪：Lenovo Vantage 的降噪插件（加载前会用 WinVerifyTrust 校验文件签名，并确认签名者是联想）

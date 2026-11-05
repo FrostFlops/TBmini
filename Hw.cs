@@ -588,122 +588,210 @@ namespace TBMini
     }
 
     // =============================================================================================
-    // 超级分辨率 = Intel video super resolution on the iGPU, set through the Intel Graphics Control Library
-    // (System32\ControlLib.dll, installed with the Intel graphics driver) — the same call Lenovo's
-    // SESuperResolutionPlugin makes. Struct layouts follow igcl_api.h (natural alignment, x64).
+    // Internal display refresh rate: fixed rates, or Windows 11 Dynamic Refresh Rate (DRR) — the panel runs at
+    // its maximum rate physically and Windows drops the desktop to a 60 Hz base when nothing moves.
+    // Fixed rates go through ChangeDisplaySettingsEx; DRR is the documented DISPLAYCONFIG_PATH_BOOST_REFRESH_RATE
+    // path flag (Windows 11), set with SetDisplayConfig. No admin needed; both are saved by Windows.
     // =============================================================================================
-    public static class IntelSr
+    public static class RefreshRate
     {
+        [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
+        [StructLayout(LayoutKind.Sequential)] struct Rational { public uint Num, Den; }
+        [StructLayout(LayoutKind.Sequential)] struct PathSource { public Luid Adapter; public uint Id, ModeIdx, Status; }
         [StructLayout(LayoutKind.Sequential)]
-        struct InitArgs { public uint Size; public byte Version; public uint AppVersion, Flags, SupportedVersion; public Guid AppUid; }
+        struct PathTarget { public Luid Adapter; public uint Id, ModeIdx, Tech, Rotation, Scaling; public Rational Refresh; public uint ScanLine; public int Available; public uint Status; }
+        [StructLayout(LayoutKind.Sequential)] struct PathInfo { public PathSource Source; public PathTarget Target; public uint Flags; }
+        [StructLayout(LayoutKind.Explicit, Size = 64)]
+        struct ModeInfo { [FieldOffset(0)] public uint Type; [FieldOffset(32)] public Rational VSync; }   // target mode: videoSignalInfo.vSyncFreq
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct SourceName { public uint Type, Size; public Luid Adapter; public uint Id; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Gdi; }
 
-        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        static extern int ctlInit(ref InitArgs args, out IntPtr api);
-        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        static extern int ctlClose(IntPtr api);
-        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        static extern int ctlEnumerateDevices(IntPtr api, ref uint count, IntPtr[] devices);
-        [DllImport("ControlLib.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        static extern int ctlGetSetVideoProcessingFeature(IntPtr device, IntPtr feature);
-
-        const int FEATURE_SIZE = 120, SR_SIZE = 92;                    // ctl_video_processing_feature_getset_t, ..._super_resolution_t
-        const int FEATURE_SUPER_RESOLUTION = 4, VALUE_TYPE_CUSTOM = 5;
-        const uint FLAG_DISABLE = 0x1, FLAG_ENABLE_DEFAULT = 0x2, FLAG_ENABLE_ANY = 0x2 | 0x4 | 0x8;
-        static readonly Guid AppId = Guid.Empty;                        // all zeros = default ID (others need registration)
-        static bool _missing;
-
-        /// 0 = off, 1 = on. The driver only offers super resolution while the iGPU drives the display, so in
-        /// dGPU direct mode this throws UnavailableException; without an Intel GPU / support, NotSupportedException.
-        public static int Read()
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct DevMode
         {
-            uint flag = 0; bool adapter = false;
-            if (WithDevice(dev => { adapter = true; return Get(dev, out flag) == 0; }))
-                return (flag & FLAG_ENABLE_ANY) != 0 && (flag & FLAG_DISABLE) == 0 ? 1 : 0;
-            if (adapter && Gpu.InternalPanelOnDgpu() == true)
-                throw new UnavailableException(T("独显直连时不可用：只在内屏由核显驱动（混合 / 集显模式）时可用",
-                                                 "Not available in dGPU direct mode: only while the iGPU drives the display (Hybrid / iGPU only)"));
-            throw new NotSupportedException("Intel super resolution");
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+            public short SpecVersion, DriverVersion, Size, DriverExtra;
+            public int Fields, PositionX, PositionY, Orientation, FixedOutput;
+            public short Color, Duplex, YResolution, TTOption, Collate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FormName;
+            public short LogPixels;
+            public int BitsPerPel, PelsWidth, PelsHeight, DisplayFlags, DisplayFrequency, ICMMethod, ICMIntent, MediaType, DitherType, Reserved1, Reserved2, PanningWidth, PanningHeight;
         }
 
-        public static void Write(int on)
+        [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+        [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PathInfo[] paths, ref uint numModes, [Out] ModeInfo[] modes, IntPtr topology);
+        [DllImport("user32.dll")] static extern int SetDisplayConfig(uint numPaths, [In] PathInfo[] paths, uint numModes, [In] ModeInfo[] modes, uint flags);
+        [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref SourceName request);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettingsW(string device, int mode, ref DevMode dm);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int ChangeDisplaySettingsExW(string device, ref DevMode dm, IntPtr hwnd, uint flags, IntPtr param);
+
+        const uint QDC_ONLY_ACTIVE_PATHS = 0x2, QDC_VIRTUAL_MODE_AWARE = 0x10, QDC_VIRTUAL_REFRESH_RATE_AWARE = 0x40;
+        const uint SDC_USE_SUPPLIED = 0x20, SDC_APPLY = 0x80, SDC_SAVE = 0x200, SDC_ALLOW_CHANGES = 0x400,
+                   SDC_VIRTUAL_MODE_AWARE = 0x8000, SDC_VIRTUAL_REFRESH_RATE_AWARE = 0x20000;
+        const uint PATH_SUPPORT_VIRTUAL_MODE = 0x8, PATH_BOOST_REFRESH_RATE = 0x10;   // DISPLAYCONFIG_PATH_* (BOOST = Windows 11 DRR)
+        const uint TECH_INTERNAL = 0x80000000, TECH_DP_EMBEDDED = 11, TECH_UDI_EMBEDDED = 13;
+        const int ENUM_CURRENT = -1, DM_DISPLAYFREQUENCY = 0x400000;
+        const uint CDS_UPDATEREGISTRY = 0x1;
+
+        static bool Win11 => Environment.OSVersion.Version.Build >= 22000;
+
+        /// What the internal panel offers right now: fixed rates (60, 120 and the panel maximum, whichever exist), plus
+        /// Dynamic on Windows 11 when the panel reaches 120 Hz, has a 60 Hz mode, and its display path reports
+        /// virtual-refresh support (DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE or BOOST). Immutable, so a read or write
+        /// always works against the same list its option indices came from.
+        public sealed class Snapshot
         {
-            uint want = on == 1 ? FLAG_ENABLE_DEFAULT : FLAG_DISABLE;
-            int rc = -1;
-            if (!WithDevice(dev => Get(dev, out _) == 0 && (rc = Set(dev, want)) == 0))
-                throw new InvalidOperationException(T("超级分辨率设置失败", "Super resolution could not be set") + (rc != -1 ? $" (0x{rc:X})" : ""));
+            public readonly int[] Rates;
+            public readonly bool Dynamic;
+            public readonly string[] Options;
+            public Snapshot(int[] rates, bool dynamic)
+            {
+                Rates = rates; Dynamic = dynamic;
+                Options = rates.Select(r => r + " Hz").Concat(dynamic ? new[] { T("动态", "Dynamic") } : new string[0]).ToArray();
+            }
         }
 
-        /// Runs fn on each Intel adapter until it returns true.
-        static bool WithDevice(Func<IntPtr, bool> fn)
+        public static int DynamicBase => 60;
+
+        /// Null when there is no active internal display (lid closed with an external monitor, second screen only …).
+        public static Snapshot Probe()
         {
-            if (_missing) return false;
-            IntPtr api = IntPtr.Zero;
             try
             {
-                var args = new InitArgs { Size = (uint)Marshal.SizeOf<InitArgs>(), AppVersion = (1u << 16) | 1u, AppUid = AppId };
-                if (ctlInit(ref args, out api) != 0 || api == IntPtr.Zero) return false;
-                uint n = 0;
-                if (ctlEnumerateDevices(api, ref n, null) != 0 || n == 0) return false;
-                var devs = new IntPtr[n];
-                if (ctlEnumerateDevices(api, ref n, devs) != 0) return false;
-                foreach (var d in devs) if (d != IntPtr.Zero && fn(d)) return true;
-                return false;
+                var p = Find(out _, out _);
+                if (p == null) return null;
+                var all = Supported(p.Value.Gdi);
+                int max = all.Count > 0 ? all.Max() : 0;
+                var rates = new[] { 60, 120, max }.Where(r => r > 0 && all.Contains(r)).Distinct().OrderBy(r => r).ToArray();
+                bool dyn = Win11 && max >= 120 && all.Contains(DynamicBase) && (p.Value.Flags & (PATH_SUPPORT_VIRTUAL_MODE | PATH_BOOST_REFRESH_RATE)) != 0;
+                return new Snapshot(rates, dyn);
             }
-            catch (DllNotFoundException) { _missing = true; return false; }
-            catch (EntryPointNotFoundException) { _missing = true; return false; }
-            finally { if (api != IntPtr.Zero) ctlClose(api); }
+            catch { return null; }
         }
 
-        /// One ctlGetSetVideoProcessingFeature call for super resolution with the custom struct at v.
-        static int Call(IntPtr dev, bool set, IntPtr v)
+        /// Option index in s: a fixed rate, s.Rates.Length for Dynamic, -1 for a rate that is not offered.
+        public static int Read(Snapshot s)
         {
-            IntPtr f = Marshal.AllocHGlobal(FEATURE_SIZE);
-            try
-            {
-                Zero(f, FEATURE_SIZE);
-                Marshal.WriteInt32(f, 0, FEATURE_SIZE);                 // Size (Version 0 at +4)
-                Marshal.WriteInt32(f, 8, FEATURE_SUPER_RESOLUTION);     // FeatureType
-                Marshal.WriteByte(f, 25, (byte)(set ? 1 : 0));          // bSet (ApplicationName NULL = global setting)
-                Marshal.WriteInt32(f, 28, VALUE_TYPE_CUSTOM);           // ValueType
-                Marshal.WriteInt32(f, 40, SR_SIZE);                     // CustomValueSize
-                Marshal.WriteIntPtr(f, 48, v);                          // pCustomValue
-                return ctlGetSetVideoProcessingFeature(dev, f);
-            }
-            finally { Marshal.FreeHGlobal(f); }
+            var p = Find(out _, out _) ?? throw new NotSupportedException(T("内屏未点亮", "internal display is off"));
+            if (p.Boost) return s.Dynamic ? s.Rates.Length : -1;
+            return Array.IndexOf(s.Rates, p.Hz);
         }
 
-        static int Get(IntPtr dev, out uint flag)
+        public static void Write(Snapshot s, int index)
         {
-            IntPtr v = Marshal.AllocHGlobal(SR_SIZE);
-            try
+            var p = Find(out _, out _) ?? throw new InvalidOperationException(T("内屏未点亮，无法设置刷新率", "The internal display is off; the refresh rate cannot be set"));
+            if (s.Dynamic && index == s.Rates.Length)
             {
-                Zero(v, SR_SIZE);
-                Marshal.WriteInt32(v, 0, SR_SIZE);                      // Size (Version 0 at +4)
-                int rc = Call(dev, false, v);
-                flag = (uint)Marshal.ReadInt32(v, 8);                   // super_resolution_flag
-                return rc;
+                int max = s.Rates.Max();
+                if (p.Boost && p.PhysicalHz == max) return;
+                int prev = p.Boost ? 0 : Current(p.Gdi);                // fixed rate to restore if DRR cannot be turned on
+                try
+                {
+                    if (p.Boost) SetBoost(false);                      // re-time from a plain mode
+                    if (Current(p.Gdi) != max) SetFixed(p.Gdi, max);  // physical rate = panel maximum
+                    SetBoost(true);
+                }
+                catch
+                {
+                    if (prev > 0) { try { if (Find(out _, out _)?.Boost == true) SetBoost(false); if (Current(p.Gdi) != prev) SetFixed(p.Gdi, prev); } catch { } }
+                    throw;
+                }
+                return;
             }
-            finally { Marshal.FreeHGlobal(v); }
+            if ((uint)index >= (uint)s.Rates.Length) throw new ArgumentOutOfRangeException(nameof(index));
+            if (p.Boost) SetBoost(false);
+            if (Current(p.Gdi) != s.Rates[index]) SetFixed(p.Gdi, s.Rates[index]);
         }
 
-        /// Reads the driver's current values first and writes them back with only the flag changed.
-        static int Set(IntPtr dev, uint flag)
+        struct Panel { public string Gdi; public int Hz, PhysicalHz; public bool Boost; public uint Flags; }
+
+        static bool Internal(uint tech) => tech == TECH_INTERNAL || tech == TECH_DP_EMBEDDED || tech == TECH_UDI_EMBEDDED;
+
+        /// Target mode index of a path: in virtual-mode-aware results the high word holds targetModeInfoIdx.
+        static uint TargetModeIdx(PathInfo path) => Win11 ? path.Target.ModeIdx >> 16 : path.Target.ModeIdx;
+
+        static Panel? Find(out PathInfo[] paths, out ModeInfo[] modes)
         {
-            IntPtr v = Marshal.AllocHGlobal(SR_SIZE);
-            try
+            paths = null; modes = null;
+            uint flags = QDC_ONLY_ACTIVE_PATHS | (Win11 ? QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE : 0);
+            int rc = 0;
+            uint np = 0, nm = 0;
+            for (int attempt = 0; attempt < 3; attempt++)                 // the topology can change between the two calls
             {
-                Zero(v, SR_SIZE);
-                Marshal.WriteInt32(v, 0, SR_SIZE);
-                int rc = Call(dev, false, v);
-                if (rc != 0) return rc;
-                Marshal.WriteInt32(v, 0, SR_SIZE);
-                Marshal.WriteInt32(v, 8, (int)flag);
-                return Call(dev, true, v);
+                if (GetDisplayConfigBufferSizes(flags, out np, out nm) != 0) return null;
+                paths = new PathInfo[np]; modes = new ModeInfo[nm];
+                rc = QueryDisplayConfig(flags, ref np, paths, ref nm, modes, IntPtr.Zero);
+                if (rc != 122 /*ERROR_INSUFFICIENT_BUFFER*/) break;
             }
-            finally { Marshal.FreeHGlobal(v); }
+            if (rc != 0) return null;
+            Array.Resize(ref paths, (int)np); Array.Resize(ref modes, (int)nm);
+            foreach (var path in paths)
+            {
+                if (!Internal(path.Target.Tech)) continue;
+                var name = new SourceName { Type = 1 /*GET_SOURCE_NAME*/, Size = (uint)Marshal.SizeOf<SourceName>(), Adapter = path.Source.Adapter, Id = path.Source.Id };
+                if (DisplayConfigGetDeviceInfo(ref name) != 0 || string.IsNullOrEmpty(name.Gdi)) continue;
+                int hz = Hz(path.Target.Refresh);
+                uint ti = TargetModeIdx(path);
+                int phys = ti < modes.Length && modes[ti].Type == 2 /*TARGET*/ ? Hz(modes[ti].VSync) : hz;
+                return new Panel { Gdi = name.Gdi, Hz = hz, PhysicalHz = phys, Boost = (path.Flags & PATH_BOOST_REFRESH_RATE) != 0, Flags = path.Flags };
+            }
+            return null;
         }
 
-        static void Zero(IntPtr p, int n) { for (int i = 0; i < n; i += 4) Marshal.WriteInt32(p, i, 0); }
+        static int Hz(Rational r) => r.Den == 0 ? 0 : (int)Math.Round((double)r.Num / r.Den);
+
+        static HashSet<int> Supported(string gdi)
+        {
+            var set = new HashSet<int>();
+            var cur = Mode(gdi, ENUM_CURRENT);
+            for (int i = 0; ; i++)
+            {
+                var dm = new DevMode { Size = (short)Marshal.SizeOf<DevMode>() };
+                if (!EnumDisplaySettingsW(gdi, i, ref dm)) break;
+                if (dm.PelsWidth == cur.PelsWidth && dm.PelsHeight == cur.PelsHeight) set.Add(dm.DisplayFrequency);
+            }
+            return set;
+        }
+
+        static DevMode Mode(string gdi, int mode)
+        {
+            var dm = new DevMode { Size = (short)Marshal.SizeOf<DevMode>() };
+            if (!EnumDisplaySettingsW(gdi, mode, ref dm)) throw new InvalidOperationException(T("读不到显示模式", "Display mode could not be read"));
+            return dm;
+        }
+
+        static int Current(string gdi) => Mode(gdi, ENUM_CURRENT).DisplayFrequency;
+
+        static void SetFixed(string gdi, int hz)
+        {
+            var dm = Mode(gdi, ENUM_CURRENT);
+            dm.DisplayFrequency = hz;
+            dm.Fields = DM_DISPLAYFREQUENCY;
+            int rc = ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
+            if (rc != 0) throw new InvalidOperationException(T("刷新率设置失败", "Refresh rate could not be set") + $" ({hz} Hz, {rc})");
+        }
+
+        /// Turns DRR on (virtual rate = 60 Hz base, physical = current mode) or off (fixed at the physical rate).
+        static void SetBoost(bool on)
+        {
+            var p = Find(out var paths, out var modes) ?? throw new InvalidOperationException(T("内屏未点亮", "Internal display is off"));
+            for (int i = 0; i < paths.Length; i++)
+            {
+                if (!Internal(paths[i].Target.Tech)) continue;
+                if (on) { paths[i].Flags |= PATH_BOOST_REFRESH_RATE; paths[i].Target.Refresh = new Rational { Num = (uint)DynamicBase, Den = 1 }; }
+                else
+                {
+                    paths[i].Flags &= ~PATH_BOOST_REFRESH_RATE;
+                    uint ti = TargetModeIdx(paths[i]);              // fixed at the exact physical timing
+                    paths[i].Target.Refresh = ti < modes.Length && modes[ti].Type == 2 ? modes[ti].VSync : new Rational { Num = (uint)p.PhysicalHz, Den = 1 };
+                }
+            }
+            uint flags = SDC_APPLY | SDC_USE_SUPPLIED | SDC_SAVE | SDC_ALLOW_CHANGES | SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
+            int rc = SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, flags);
+            if (rc != 0)
+                throw new InvalidOperationException((on ? T("动态刷新率开启失败", "Dynamic refresh rate could not be turned on")
+                                                        : T("动态刷新率关闭失败", "Dynamic refresh rate could not be turned off")) + $" ({rc})");
+        }
     }
 
     // =============================================================================================
