@@ -24,9 +24,15 @@ namespace TBMini
     sealed class Theme
     {
         public bool Dark;
+        public bool Glass;                      // acrylic backdrop + translucent surfaces (Windows 11 22H2+, transparency on)
         public Color Bg, Card, CardBorder, Divider, Fg, Sub, Ctl, CtlHover, Track, Accent, Disabled;
+        public Color Hi, HiLow;                 // surface edge: light catching the top of the glass, fading downwards
+        public Color MenuBg, FrameBorder;       // opaque menu background; DWM window border
+        public Color Tint = Color.Transparent;  // frost over the acrylic backdrop, keeps text readable on busy backgrounds
+        public float Radius => Glass ? 12f : 8f;
 #if TBMINI_DEV
         public static bool? ForceDark;   // screenshot hook only
+        public static bool? ForceGlass;  // screenshot hook only
 #endif
 
         public static string IconFont { get; } =
@@ -38,18 +44,42 @@ namespace TBMini
 #if TBMINI_DEV
             if (ForceDark.HasValue) dark = ForceDark.Value;
 #endif
-            var t = new Theme { Dark = dark };
+            var t = new Theme { Dark = dark, Glass = TBMini.Glass.Supported && TBMini.Glass.TransparencyOn };
+#if TBMINI_DEV
+            if (ForceGlass.HasValue) t.Glass = ForceGlass.Value;
+#endif
             if (dark)
             {
                 t.Bg = C(0x1F1F1F); t.Card = C(0x2A2A2A); t.CardBorder = C(0x363636); t.Divider = C(0x333333);
                 t.Fg = C(0xF3F3F3); t.Sub = C(0x9D9D9D); t.Ctl = C(0x353535); t.CtlHover = C(0x404040);
                 t.Track = C(0x1C1C1C); t.Disabled = C(0x666666);
+                t.MenuBg = C(0x2C2C2C); t.FrameBorder = C(0x3A3A3A);
             }
             else
             {
                 t.Bg = C(0xF3F3F3); t.Card = C(0xFFFFFF); t.CardBorder = C(0xE3E3E3); t.Divider = C(0xEDEDED);
                 t.Fg = C(0x1B1B1B); t.Sub = C(0x6B6B6B); t.Ctl = C(0xF2F2F2); t.CtlHover = C(0xE8E8E8);
                 t.Track = C(0xEBEBEB); t.Disabled = C(0xA8A8A8);
+                t.MenuBg = C(0xF9F9F9); t.FrameBorder = C(0xD6D6D6);
+            }
+            t.Hi = t.HiLow = t.CardBorder;
+            if (t.Glass)
+            {
+                // translucent surfaces over the acrylic backdrop; the form itself paints nothing (GDI black = see-through)
+                t.Bg = Color.Black;
+                t.Tint = dark ? A(0x1A1A1A, 96) : A(0xF6F6F6, 96);
+                if (dark)
+                {
+                    t.Card = A(0xFFFFFF, 20); t.Divider = A(0xFFFFFF, 22); t.Ctl = A(0xFFFFFF, 16); t.CtlHover = A(0xFFFFFF, 38);
+                    t.Track = A(0x000000, 60); t.Sub = A(0xFFFFFF, 160); t.Disabled = A(0xFFFFFF, 80);
+                    t.Hi = A(0xFFFFFF, 80); t.HiLow = A(0xFFFFFF, 14); t.CardBorder = A(0xFFFFFF, 34);
+                }
+                else
+                {
+                    t.Card = A(0xFFFFFF, 140); t.Divider = A(0x000000, 18); t.Ctl = A(0xFFFFFF, 120); t.CtlHover = A(0xFFFFFF, 210);
+                    t.Track = A(0x000000, 16); t.Sub = A(0x000000, 150); t.Disabled = A(0x000000, 72);
+                    t.Hi = A(0xFFFFFF, 245); t.HiLow = A(0xFFFFFF, 90); t.CardBorder = A(0x000000, 20);
+                }
             }
             var acc = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\DWM", "AccentColor", null);
             Color a = acc is int abgr ? Color.FromArgb(abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF) : C(0x0F6CBD);
@@ -58,9 +88,20 @@ namespace TBMini
         }
 
         static Color C(int rgb) => Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+        static Color A(int rgb, int alpha) => Color.FromArgb(alpha, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 
         public static Color Mix(Color a, Color b, float t) =>
             Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+
+        /// Surface edge: on glass a gradient from Hi (top) to HiLow (bottom), like light on the rim; otherwise a plain border.
+        public static void Edge(Graphics g, RectangleF r, float radius, Theme t, float ui)
+        {
+            using var p = Draw.RoundRect(r, radius);
+            if (!t.Glass) { using var pen0 = new Pen(t.CardBorder); g.DrawPath(pen0, p); return; }
+            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), t.Hi, t.HiLow, 90f);
+            using var pen = new Pen(b, Math.Max(1f, ui * 0.9f));
+            g.DrawPath(pen, p);
+        }
 
         /// White or near-black text, whichever reads better on c.
         public static Color On(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) > 160 ? Color.FromArgb(0x1B, 0x1B, 0x1B) : Color.White;
@@ -102,7 +143,7 @@ namespace TBMini
         readonly Font _title, _sec, _row, _small, _tileText, _value;
         readonly ToolTip _tip = new ToolTip { InitialDelay = 350, AutoPopDelay = 15000 };
 
-        readonly Label _hTitle;
+        readonly GlassLabel _hTitle;
         readonly Chip _chipPower, _chipGpu;
         readonly Metric _mCpu, _mGpu, _mTotal;
         readonly Timer _sensorTimer = new Timer { Interval = 1500 };
@@ -110,15 +151,16 @@ namespace TBMini
         readonly Timer _anim = new Timer { Interval = 10 };   // pop-up: short slide + fade
         int _animFrom, _animTo, _animStart;
         const int AnimMs = 450, AnimRise = 56;
+        bool _animFade;
         IntPtr _powerNotify;
-        readonly Label _secPerf, _secGpu;
+        readonly GlassLabel _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
         readonly Tile[] _pt = new Tile[4];
         readonly Tile[] _gt = new Tile[3];
-        readonly Label _status;
-        readonly LinkLabel _link;
+        readonly GlassLabel _status;
+        readonly GlassLabel _link;
         readonly Dictionary<string, Row> _rows = new Dictionary<string, Row>();
-        readonly Dictionary<string, (Label label, Card card)> _sections = new Dictionary<string, (Label, Card)>();
+        readonly Dictionary<string, (GlassLabel label, Card card)> _sections = new Dictionary<string, (GlassLabel, Card)>();
 
         bool _menuOpen, _anchorBottom;
         public int HiddenAt;   // Environment.TickCount when the panel last auto-hid
@@ -126,7 +168,7 @@ namespace TBMini
         sealed class Row
         {
             public Feature F;
-            public Label Label;
+            public GlassLabel Label;
             public Control Ctl;          // Toggle / Segmented / Drop
             public bool Shown;           // own flag: Control.Visible reads false while the form is hidden
         }
@@ -156,7 +198,7 @@ namespace TBMini
             _value = new Font("Segoe UI Semibold", 9.25f);
             Width = S(2 * ColW + Gap + 2 * Pad);
 
-            _hTitle = new Label { Text = "TBMini", Font = _title, AutoSize = true };
+            _hTitle = new GlassLabel { Font = _title, AutoFit = true, Text = "TBMini" };
             _chipPower = new Chip { Font = _small, Ui = _s };
             _chipGpu = new Chip { Font = _small, Ui = _s, Glyph = Glyph.Chip };
             Controls.AddRange(new Control[] { _hTitle, _chipPower, _chipGpu });
@@ -190,9 +232,9 @@ namespace TBMini
             }
             Controls.AddRange(new Control[] { _secPerf, _cardPerf, _secGpu, _cardGpu });
 
-            _status = new Label { Font = _small, AutoSize = false };
-            _link = new LinkLabel { Font = _small, AutoSize = true, Visible = false };
-            _link.LinkClicked += (s, e) => { Hide(); _app.RestartNow(); };
+            _status = new GlassLabel { Font = _small };
+            _link = new GlassLabel { Font = _small, AutoFit = true, Link = true, Visible = false };
+            _link.Click += (s, e) => { Hide(); _app.RestartNow(); };
             Controls.AddRange(new Control[] { _status, _link });
 
             Deactivate += (s, e) => { if (!_menuOpen) { HiddenAt = Environment.TickCount; Hide(); } };
@@ -283,6 +325,8 @@ namespace TBMini
         protected override void WndProc(ref Message m)
         {
             const int WM_POWERBROADCAST = 0x218, PBT_APMSUSPEND = 0x4, PBT_POWERSETTINGCHANGE = 0x8013;
+            // keep the active (live acrylic) look while a dropdown menu has the focus; the panel hides on real deactivation
+            if (m.Msg == Glass.WM_NCACTIVATE && _t.Glass) m.WParam = (IntPtr)1;
             if (m.Msg == WM_POWERBROADCAST)
             {
                 int ev = (int)(long)m.WParam;
@@ -381,7 +425,7 @@ namespace TBMini
             if (relayout) LayoutHeader();
         }
 
-        Label SectionLabel(string text) => new Label { Text = text, Font = _sec, AutoSize = true };
+        GlassLabel SectionLabel(string text) => new GlassLabel { Font = _sec, AutoFit = true, Text = text };
 
         protected override CreateParams CreateParams
         {
@@ -397,14 +441,19 @@ namespace TBMini
         static bool Win11 => Environment.OSVersion.Version.Build >= 22000;
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
 
+        bool _glassApplied;
+
         void ApplyDwm()
         {
-            if (!Win11 || !IsHandleCreated) return;
-            int round = 2, dark = _t.Dark ? 1 : 0;
-            int border = _t.CardBorder.R | (_t.CardBorder.G << 8) | (_t.CardBorder.B << 16);
-            DwmSetWindowAttribute(Handle, 33 /*WINDOW_CORNER_PREFERENCE*/, ref round, 4);
-            DwmSetWindowAttribute(Handle, 20 /*USE_IMMERSIVE_DARK_MODE*/, ref dark, 4);
-            DwmSetWindowAttribute(Handle, 34 /*BORDER_COLOR*/, ref border, 4);
+            if (!IsHandleCreated) return;
+            Glass.Apply(Handle, _t);
+            if (_glassApplied != _t.Glass) { _glassApplied = _t.Glass; Invalidate(true); }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (_t.Glass) Glass.Frost(e.Graphics, ClientRectangle, _t);    // the acrylic backdrop shows through, frosted
+            else base.OnPaintBackground(e);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -424,7 +473,7 @@ namespace TBMini
                 _sections[f.Section] = sec;
                 Controls.Add(sec.label); Controls.Add(sec.card);
             }
-            r = new Row { F = f, Label = new Label { Text = f.Label, Font = _row, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft } };
+            r = new Row { F = f, Label = new GlassLabel { Text = f.Label, Font = _row } };
             if (f.Tip != null) _tip.SetToolTip(r.Label, f.Tip);
             sec.card.Controls.Add(r.Label);
             _rows[f.Id] = r;
@@ -463,15 +512,15 @@ namespace TBMini
         void ShowChoiceMenu(Feature f, Control anchor)
         {
             var st = _app.FeatureStateOf(f);
-            var m = new ContextMenuStrip { Font = _row, ShowImageMargin = false, ShowCheckMargin = true };
-            if (_t.Dark) m.Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors(_t));
+            var m = new ContextMenuStrip();
             for (int i = 0; i < f.Options.Length; i++)
             {
                 int ii = i;
-                var it = new ToolStripMenuItem(f.Options[i]) { Checked = st.Value == i, Enabled = !st.Busy, ForeColor = _t.Fg };
+                var it = new ToolStripMenuItem(f.Options[i]) { Checked = st.Value == i, Enabled = !st.Busy };
                 it.Click += (s, e) => _app.SetFeature(f, ii);
                 m.Items.Add(it);
             }
+            GlassMenu.Style(m, _t);
             _menuOpen = true;
             m.Closed += (s, e) =>
             {
@@ -541,13 +590,13 @@ namespace TBMini
         /// One titled card in a column: either mode tiles or a feature section with visible rows.
         sealed class Block
         {
-            public Label Title; public Card Card;
+            public GlassLabel Title; public Card Card;
             public Tile[] Tiles;               // tile block
             public List<Row> Rows;             // feature section block
             public int CardH;                  // natural card height
         }
 
-        Block TileBlock(Label title, Card card, Tile[] tiles) =>
+        Block TileBlock(GlassLabel title, Card card, Tile[] tiles) =>
             new Block { Title = title, Card = card, Tiles = tiles, CardH = S(TileH) + 2 * S(8) };
 
         /// The section's visible rows, or null when none is supported.
@@ -662,19 +711,18 @@ namespace TBMini
         {
             _t = Theme.Load();
             BackColor = _t.Bg;
-            _hTitle.ForeColor = _t.Fg; _hTitle.BackColor = _t.Bg;
+            _hTitle.ForeColor = _t.Fg; _hTitle.T = _t;
             foreach (var c in new Owner[] { _chipPower, _chipGpu, _mCpu, _mGpu, _mTotal }) c.T = _t;
-            foreach (var l in new[] { _secPerf, _secGpu, _status }) { l.ForeColor = _t.Sub; l.BackColor = _t.Bg; }
+            foreach (var l in new[] { _secPerf, _secGpu, _status }) { l.ForeColor = _t.Sub; l.T = _t; }
             foreach (var c in new[] { _cardPerf, _cardGpu }) c.T = _t;
             foreach (var t in _pt.Concat(_gt)) t.T = _t;
-            foreach (var (label, card) in _sections.Values) { label.ForeColor = _t.Sub; label.BackColor = _t.Bg; card.T = _t; }
+            foreach (var (label, card) in _sections.Values) { label.ForeColor = _t.Sub; label.T = _t; card.T = _t; }
             foreach (var r in _rows.Values)
             {
-                r.Label.ForeColor = _t.Fg; r.Label.BackColor = _t.Card;
+                r.Label.ForeColor = _t.Fg; r.Label.T = _t;
                 if (r.Ctl is IThemed th) th.T = _t;
             }
-            _link.BackColor = _t.Bg;
-            _link.LinkColor = _link.ActiveLinkColor = _t.Accent;
+            _link.ForeColor = _t.Accent; _link.T = _t;
             ApplyDwm();
         }
 
@@ -757,8 +805,8 @@ namespace TBMini
             _link.Visible = pend != null;
             if (pend != null)
             {
-                var sz = TextRenderer.MeasureText(line, _status.Font);
-                _link.Location = new Point(Math.Min(_status.Left + sz.Width + S(6), Width - S(Pad) - _link.Width), _status.Top);
+                int lw = Gx.Width(line, _status.Font);
+                _link.Location = new Point(Math.Min(_status.Left + lw + S(6), Width - S(Pad) - _link.Width), _status.Top + (_status.Height - _link.Height) / 2);
                 _link.BringToFront();
             }
         }
@@ -780,7 +828,8 @@ namespace TBMini
             {   // rise from the taskbar side and fade in, like the Windows 11 flyouts
                 _animTo = y;
                 _animFrom = y + (_anchorBottom ? S(AnimRise) : -S(AnimRise));
-                Opacity = 0;
+                _animFade = !_t.Glass;
+                if (_animFade) Opacity = 0;
                 Location = new Point(x, _animFrom);
                 _animStart = Environment.TickCount;
                 _anim.Start();
@@ -789,6 +838,7 @@ namespace TBMini
             Show();
             Activate();
             SetForegroundWindow(Handle);
+            if (_t.Glass) Glass.ShowActive(this);
         }
 
         void AnimStep()
@@ -796,8 +846,8 @@ namespace TBMini
             double t = Math.Min(1.0, (Environment.TickCount - _animStart) / (double)AnimMs);
             double e = 1 - Math.Pow(1 - t, 3);                      // position: ease-out cubic
             Top = (int)Math.Round(_animFrom + (_animTo - _animFrom) * e);
-            if (t >= 1) { _anim.Stop(); Top = _animTo; Opacity = 1; }   // back to a normal (non-layered) window
-            else Opacity = Math.Max(0.01, 1 - (1 - t) * (1 - t));   // fade: ease-out quadratic, spans the whole rise
+            if (t >= 1) { _anim.Stop(); Top = _animTo; if (_animFade) Opacity = 1; }   // back to a normal (non-layered) window
+            else if (_animFade) Opacity = Math.Max(0.01, 1 - (1 - t) * (1 - t));     // fade: ease-out quadratic, spans the whole rise
         }
 
         /// Honours "Animation effects" in Windows settings (SPI_GETCLIENTAREAANIMATION).
@@ -863,13 +913,13 @@ namespace TBMini
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnMouseDown(MouseEventArgs e) { _down = e.Button; base.OnMouseDown(e); }
         protected override void OnClick(EventArgs e) { if (_down == MouseButtons.Left) base.OnClick(e); }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
 
         protected Graphics Prep(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            g.Clear(Parent?.BackColor ?? T.Bg);
+            Glass.Backdrop(g, this, T);
             return g;
         }
 
@@ -887,38 +937,54 @@ namespace TBMini
             g.DrawPath(pen, p);
         }
 
-        protected void DrawGlyph(Graphics g, string glyph, float size, Rectangle r, Color c)
+        /// Glass edge: bright where light hits the top, fading downwards (a plain border on the opaque theme).
+        protected void Edge(Graphics g, RectangleF r, float radius) => Theme.Edge(g, r, radius, T, Ui);
+
+        /// Glossy sheen on a coloured (selected) surface.
+        protected void Sheen(Graphics g, RectangleF r, float radius)
         {
-            using var f = new Font(Theme.IconFont, size * Ui, GraphicsUnit.Pixel);
-            TextRenderer.DrawText(g, glyph, f, r, c, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (!T.Glass) return;
+            using var p = Draw.RoundRect(r, radius);
+            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height / 2 + 2), Color.FromArgb(70, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f);
+            using var clip = g.Clip;
+            g.SetClip(new RectangleF(r.X, r.Y, r.Width, r.Height / 2), CombineMode.Intersect);
+            g.FillPath(b, p);
+            g.Clip = clip;
         }
+
+        protected void DrawGlyph(Graphics g, string glyph, float size, Rectangle r, Color c) => Gx.Glyph(g, glyph, size * Ui, r, c, T);
+
+        protected void DrawText(Graphics g, string s, Font f, RectangleF r, Color c,
+                            StringAlignment h = StringAlignment.Near, StringAlignment v = StringAlignment.Center, bool ellipsis = false)
+            => Gx.Text(g, s, f, r, c, T, h, v, ellipsis);
     }
 
     /// Rounded settings card; draws row dividers.
     sealed class Card : Panel, IThemed
     {
         Theme _t = Theme.Load();
-        public Theme T { get => _t; set { _t = value; BackColor = value.Card; Invalidate(); } }
+        public Theme T { get => _t; set { _t = value; BackColor = value.Glass ? Color.Black : value.Card; Invalidate(); } }
         public float Ui = 1f;
         public int[] Dividers = new int[0];
 
         public Card()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            BackColor = _t.Card;
+            BackColor = _t.Glass ? Color.Black : _t.Card;
         }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Parent?.BackColor ?? _t.Bg);
+            if (_t.Glass) Glass.Frost(g, ClientRectangle, _t); else g.Clear(Parent?.BackColor ?? _t.Bg);
             var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-            using (var p = Draw.RoundRect(r, 8 * Ui))
-            {
-                using (var b = new SolidBrush(_t.Card)) g.FillPath(b, p);
-                using (var pen = new Pen(_t.CardBorder)) g.DrawPath(pen, p);
-            }
+            using (var p = Draw.RoundRect(r, _t.Radius * Ui))
+            using (var b = new SolidBrush(_t.Card))
+                g.FillPath(b, p);
+            Theme.Edge(g, r, _t.Radius * Ui, _t, Ui);
             using var dp = new Pen(_t.Divider);
             foreach (int y in Dividers) g.DrawLine(dp, 14 * Ui, y, Width - 14 * Ui, y);
         }
@@ -935,16 +1001,18 @@ namespace TBMini
             var g = Prep(e);
             Color bg = Selected ? Accent : Hover && Enabled ? T.CtlHover : T.Ctl;
             Color fg = !Enabled && !Selected ? T.Disabled : Selected ? Theme.On(Accent) : T.Fg;
-            Fill(g, new RectangleF(0, 0, Width, Height), 6 * Ui, bg);
-            if (!Selected) Stroke(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), 6 * Ui, Theme.Mix(T.CardBorder, bg, 0.3f));
+            float rad = (T.Glass ? 10 : 6) * Ui;
+            var box = new RectangleF(0, 0, Width, Height);
+            Fill(g, box, rad, bg);
+            if (Selected) Sheen(g, box, rad);
+            else Edge(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), rad);
             int gh = S(26);
             DrawGlyph(g, Glyph, 18, new Rectangle(0, S(9), Width, gh), Selected ? fg : (Enabled ? Accent : T.Disabled));
             // shrink long labels (e.g. English "Performance") to fit instead of cutting them off
             var font = Font;
-            int avail = Width - S(8), tw = TextRenderer.MeasureText(g, Text, font).Width;
+            int avail = Width - S(8), tw = Gx.Width(Text, font);
             if (tw > avail) font = new Font(Font.FontFamily, Math.Max(7f, Font.Size * avail / tw), Font.Style);
-            TextRenderer.DrawText(g, Text, font, new Rectangle(0, S(9) + gh, Width, Height - S(9) - gh - S(4)), fg,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            DrawText(g, Text, font, new RectangleF(0, S(9) + gh, Width, Height - S(9) - gh - S(4)), fg, StringAlignment.Center, StringAlignment.Near, ellipsis: true);
             if (!ReferenceEquals(font, Font)) font.Dispose();
         }
     }
@@ -984,11 +1052,19 @@ namespace TBMini
             {
                 var cell = new RectangleF(i * w + inset, inset, w - 2 * inset, Height - 2 * inset);
                 bool sel = i == Selected;
-                if (sel) Fill(g, cell, cell.Height / 2f, Enabled ? T.Accent : T.Disabled);
+                if (sel)
+                {
+                    Fill(g, cell, cell.Height / 2f, Enabled ? T.Accent : T.Disabled);
+                    if (Enabled) Sheen(g, cell, cell.Height / 2f);
+                }
                 else if (i == _hoverIdx && Enabled) Fill(g, cell, cell.Height / 2f, T.CtlHover);
                 Color fg = sel ? Theme.On(T.Accent) : Enabled ? T.Fg : T.Disabled;
-                TextRenderer.DrawText(g, Options[i], Font, Rectangle.Round(cell), fg,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                // shrink a label that does not fit its segment (e.g. English "Dynamic") instead of cutting it off
+                var font = Font;
+                float avail = cell.Width - 4 * Ui, tw = Gx.Width(Options[i], font);
+                if (tw > avail) font = new Font(Font.FontFamily, Math.Max(6.5f, Font.Size * avail / tw), Font.Style);
+                DrawText(g, Options[i], font, cell, fg, StringAlignment.Center, StringAlignment.Center, ellipsis: true);
+                if (!ReferenceEquals(font, Font)) font.Dispose();
             }
         }
     }
@@ -1006,13 +1082,14 @@ namespace TBMini
             {
                 Color c = Enabled ? (Hover ? Theme.Mix(T.Accent, Color.White, 0.08f) : T.Accent) : T.Disabled;
                 Fill(g, r, r.Height / 2, c);
+                if (Enabled) Sheen(g, r, r.Height / 2);
                 knob = r.Height - 8 * Ui;
                 using var kb = new SolidBrush(Theme.On(c));
                 g.FillEllipse(kb, r.Right - 4 * Ui - knob, r.Y + (r.Height - knob) / 2, knob, knob);
             }
             else
             {
-                if (Hover && Enabled) Fill(g, r, r.Height / 2, T.CtlHover);
+                Fill(g, r, r.Height / 2, Hover && Enabled ? T.CtlHover : (T.Glass ? T.Track : Color.Transparent));
                 Stroke(g, r, r.Height / 2, Enabled ? T.Sub : T.Disabled, 1.2f * Ui);
                 knob = r.Height - 10 * Ui;
                 using var kb = new SolidBrush(Enabled ? T.Sub : T.Disabled);
@@ -1027,10 +1104,10 @@ namespace TBMini
         {
             var g = Prep(e);
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
-            Fill(g, r, 5 * Ui, Hover && Enabled ? T.CtlHover : T.Ctl);
-            Stroke(g, r, 5 * Ui, T.CardBorder);
-            TextRenderer.DrawText(g, Text, Font, new Rectangle(S(10), 0, Width - S(34), Height), Enabled ? T.Fg : T.Disabled,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            float rad = (T.Glass ? 8 : 5) * Ui;
+            Fill(g, r, rad, Hover && Enabled ? T.CtlHover : T.Ctl);
+            Edge(g, r, rad);
+            DrawText(g, Text, Font, new RectangleF(S(10), 0, Width - S(34), Height), Enabled ? T.Fg : T.Disabled, ellipsis: true);
             DrawGlyph(g, TBMini.Glyph.Chevron, 10, new Rectangle(Width - S(26), 0, S(18), Height), T.Sub);
         }
     }
@@ -1041,17 +1118,16 @@ namespace TBMini
 
         public Chip() { Cursor = Cursors.Default; }
 
-        public int PreferredWidth => S(10) + S(16) + S(4) + TextRenderer.MeasureText(Text ?? "", Font).Width + S(8);
+        public int PreferredWidth => S(10) + S(16) + S(4) + Gx.Width(Text ?? "", Font) + S(10);
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = Prep(e);
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             Fill(g, r, r.Height / 2f, T.Card);
-            Stroke(g, r, r.Height / 2f, T.CardBorder);
+            Edge(g, r, r.Height / 2f);
             DrawGlyph(g, Glyph, 13, new Rectangle(S(9), 0, S(16), Height), T.Sub);
-            TextRenderer.DrawText(g, Text, Font, new Rectangle(S(28), 0, Width - S(30), Height), T.Fg,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            DrawText(g, Text, Font, new RectangleF(S(28), 0, Width - S(30), Height), T.Fg);
         }
     }
 
@@ -1067,11 +1143,9 @@ namespace TBMini
         public bool ReserveTemp;                       // keep room for a temperature
         public string[] Templates = { "188 W" };       // widest value texts expected
 
-        const TextFormatFlags F = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
-
         public Metric() { Cursor = Cursors.Default; }
 
-        int Measure(string s, Font f) => TextRenderer.MeasureText(s, f, Size.Empty, F).Width;
+        static int Measure(string s, Font f) => Gx.Width(s, f);
 
         public int PreferredWidth
         {
@@ -1107,46 +1181,27 @@ namespace TBMini
             var g = Prep(e);
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             Fill(g, r, r.Height / 2f, T.Card);
-            Stroke(g, r, r.Height / 2f, T.CardBorder);
+            Edge(g, r, r.Height / 2f);
             DrawGlyph(g, Glyph, 13, new Rectangle(S(7), 0, S(16), Height), T.Accent);
             int labelEnd = S(27);
             if (ShowLabel && Label != "")
             {
-                TextRenderer.DrawText(g, Label, Font, new Rectangle(S(27), 0, Width, Height), T.Sub, F | TextFormatFlags.Left);
-                labelEnd += TextRenderer.MeasureText(g, Label, Font, Size.Empty, F).Width;
+                DrawText(g, Label, Font, new RectangleF(S(27), 0, Width, Height), T.Sub);
+                labelEnd += Measure(Label, Font);
             }
             var vf = ValueFont ?? Font;
             int right = Width - S(10);
-            int vw = TextRenderer.MeasureText(g, Value, vf, Size.Empty, F).Width;
-            TextRenderer.DrawText(g, Value, vf, new Rectangle(right - vw, 0, vw + S(2), Height), Muted ? T.Sub : T.Fg, F | TextFormatFlags.Left);
+            int vw = Measure(Value, vf);
+            DrawText(g, Value, vf, new RectangleF(right - vw, 0, vw + S(4), Height), Muted ? T.Sub : T.Fg);
             if (Temp != "")
             {
                 // centred in the space between the label and the power value, so the two numbers read separately
-                int tw = TextRenderer.MeasureText(g, Temp, vf, Size.Empty, F).Width;
-                int valueStart = right - Math.Max(vw, Templates.Max(t => TextRenderer.MeasureText(g, t, vf, Size.Empty, F).Width));
+                int tw = Measure(Temp, vf);
+                int valueStart = right - Math.Max(vw, Templates.Max(t => Measure(t, vf)));
                 int tx = (labelEnd + valueStart - tw) / 2;
                 tx = Math.Max(labelEnd + S(6), Math.Min(tx, right - vw - S(6) - tw));
-                TextRenderer.DrawText(g, Temp, vf, new Rectangle(tx, 0, tw + S(2), Height), TempColor(), F | TextFormatFlags.Left);
+                DrawText(g, Temp, vf, new RectangleF(tx, 0, tw + S(4), Height), TempColor());
             }
         }
-    }
-
-    /// Dark colours for the dropdown menus.
-    sealed class DarkMenuColors : ProfessionalColorTable
-    {
-        readonly Theme _t;
-        public DarkMenuColors(Theme t) { _t = t; UseSystemColors = false; }
-        public override Color ToolStripDropDownBackground => _t.Card;
-        public override Color ImageMarginGradientBegin => _t.Card;
-        public override Color ImageMarginGradientMiddle => _t.Card;
-        public override Color ImageMarginGradientEnd => _t.Card;
-        public override Color MenuBorder => _t.CardBorder;
-        public override Color MenuItemBorder => _t.CtlHover;
-        public override Color MenuItemSelected => _t.CtlHover;
-        public override Color CheckBackground => _t.Ctl;
-        public override Color CheckSelectedBackground => _t.CtlHover;
-        public override Color CheckPressedBackground => _t.CtlHover;
-        public override Color SeparatorDark => _t.Divider;
-        public override Color SeparatorLight => _t.Divider;
     }
 }

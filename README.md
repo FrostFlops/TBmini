@@ -56,6 +56,7 @@ Turn off Start at sign-in → right-click the tray icon → Exit. Then delete th
 ## Usage
 
 - **Left-click** the tray icon to open the panel. **Right-click** for the menu (language, start at sign-in, exit and so on). The panel slides in briefly; turning off "Animation effects" in Windows settings turns that off too.
+- On Windows 11 22H2 and later, the panel and its menus are glass: Windows' own acrylic material (a live blur of whatever is behind) under translucent cards. With "Transparency effects" off in Windows settings, or on Windows 10, they are drawn solid in the same colours.
 - The tray icon's color and symbol show the current performance mode.
 - **Language:** App → Language in the panel, or Language in the tray menu. The change applies immediately. "System" follows the Windows display language: Chinese on Chinese Windows, English otherwise.
 - Before the touchpad can be turned off, a USB or Bluetooth mouse-class device must be connected (some keyboards and receivers with mouse functions count). Once it is off, unplugging any mouse that was connected at that moment turns the touchpad back on. While TBMini is running, **Ctrl+Alt+Shift+T** also turns it back on.

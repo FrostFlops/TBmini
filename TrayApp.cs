@@ -625,6 +625,7 @@ namespace TBMini
             var exit = new ToolStripMenuItem(T("退出", "Exit")) { Enabled = !_busy && !_fstate.Values.Any(x => x.Busy) };
             exit.Click += (s, e) => ExitThread();
             _menu.Items.Add(exit);
+            GlassMenu.Style(_menu, Theme.Load());   // same glass / colours as the panel, rebuilt with the current theme
         }
 
         /// Tray-menu path: save the preference and refresh the UI.
@@ -677,6 +678,7 @@ namespace TBMini
         internal void RenderPanelTo(string path) => _panel.RenderTo(path);
         internal void ApplyLanguageForDev() => ApplyLanguage();
         internal ModePanel PanelForDev => _panel;
+        internal ContextMenuStrip MenuForDev() { BuildMenu(); return _menu; }
 #endif
 
         void ShowPanel()
