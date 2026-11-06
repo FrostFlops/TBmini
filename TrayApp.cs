@@ -50,7 +50,7 @@ namespace TBMini
 #endif
             _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
             _menu = new ContextMenuStrip();
-            _menu.Opening += (s, e) => { BuildMenu(); e.Cancel = false; };
+            _menu.Opening += (s, e) => { CheckCharger(); BuildMenu(); e.Cancel = false; };
             _icon = new NotifyIcon { ContextMenuStrip = _menu, Visible = true, Text = "TBMini" };
             _icon.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left) ShowPanel(); };
 
@@ -59,7 +59,8 @@ namespace TBMini
 
             // No periodic timers while idle: power mode via registry change notification, AC via SystemEvents,
             // touchpad guard via WM_DEVICECHANGE (+ a slow fallback only while armed).
-            _powerWatch = RegWatcher.TryCreate(Its.SliderKeyPath, () => _ui.Post(_ => PollPower(), null));
+            // the dispatcher also writes other values here; only a real mode change (it does that on a charger change) re-checks the charger
+            _powerWatch = RegWatcher.TryCreate(Its.SliderKeyPath, () => _ui.Post(_ => { if (PollPower()) CheckCharger(); }, null));
             _guardTimer = new System.Windows.Forms.Timer { Interval = 15000 };
             _guardTimer.Tick += (s, e) => GuardCheck();
             _devDebounce = new System.Windows.Forms.Timer { Interval = 1500 };
@@ -71,7 +72,7 @@ namespace TBMini
             _colorDebounce = new System.Windows.Forms.Timer { Interval = 3000 };
             _colorDebounce.Tick += (s, e) => { _colorDebounce.Stop(); _ = Task.Run(() => { try { ColorPreset.Reapply(); } catch { } }); };
 
-            // Auto adjust (saver on battery / performance on a slow charger / geek on the full-power adapter):
+            // Auto adjust (saver on battery or a charger that can't keep up / performance on USB-C / geek on the full-power adapter):
             // reacts to charger events only — a one-shot timer re-checks shortly after an event, nothing polls.
             _autoPower = Registry.GetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", 0) is int ap && ap == 1;
             _autoTimer = new System.Windows.Forms.Timer();
@@ -98,11 +99,12 @@ namespace TBMini
         {
             _autoPower = on;
             try { Registry.SetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", on ? 1 : 0, RegistryValueKind.DWord); } catch { }
+            if (on) Charger.PlugChanged();   // turning it on re-evaluates the charger from scratch (clears the Weak latch)
             _panel.UpdateView();
             if (on) ApplyAuto();
         }
 
-        /// Checks now-ish and once more a few seconds later (a USB-C PD charger is reported as slow only after it negotiated).
+        /// Checks now-ish and once more a few seconds later (Lenovo's dispatcher and Windows may still be settling).
         void ScheduleAuto(int ms)
         {
             if (_test) return;
@@ -118,32 +120,40 @@ namespace TBMini
             if (--_autoChecks > 0) { _autoTimer.Interval = 6000; _autoTimer.Start(); }
         }
 
-        static PowerMode AutoTarget() => Charger.Current switch
+        static PowerMode AutoTarget(ChargerKind k) => k switch
         {
             ChargerKind.None => PowerMode.Saver,
+            ChargerKind.Weak => PowerMode.Saver,          // the battery drains even while plugged in
             ChargerKind.Slow => PowerMode.Performance,
             _ => Its.GeekAvailable ? PowerMode.Geek : PowerMode.Performance,
         };
 
+        ChargerKind _chargerSeen = (ChargerKind)(-1);   // what the last auto check saw (UI thread)
+
         void ApplyAuto(bool quiet = false)
         {
             if (_test || _busy || !Its.Supported || _power == PowerMode.Unknown) return;   // no Lenovo mode service: nothing to drive
+            var kind = Charger.Current;
+            _chargerSeen = kind;
             PowerMode target;
-            if (_autoPower) target = AutoTarget();
-            else if (_power == PowerMode.Geek && Charger.Current == ChargerKind.Slow) target = PowerMode.Performance;   // Geek is not allowed on a slow charger
+            if (_autoPower) target = AutoTarget(kind);
+            else if (_power == PowerMode.Geek && Charger.Limited(kind)) target = PowerMode.Performance;   // Geek needs the full-power adapter
             else return;
             if (target != _power) SetPowerCore(target, quiet);
         }
 
         // ------------------------------------------------------------------ state
-        void PollPower(bool force = false)
+        /// Returns true when the mode or AC state changed.
+        bool PollPower(bool force = false)
         {
             var p = Its.Read();
             bool ac = Its.OnAC;
-            if (!force && p == _power && ac == _ac) return;
+            bool changed = p != _power || ac != _ac;
+            if (!force && !changed) return false;
             _power = p; _ac = ac;
             UpdateIcon();
             _panel.UpdateView();
+            return changed;
         }
 
         void OnSystemPower(object sender, PowerModeChangedEventArgs e)
@@ -157,9 +167,24 @@ namespace TBMini
             if (Program.IsAdmin && (e.Mode == PowerModes.Resume || (e.Mode == PowerModes.StatusChange && acChanged)))
                 _ui.Post(_ => { if (!_busy) _ = Task.Run(() => ReconcileDgpu(5000)); }, null);
             if (e.Mode == PowerModes.Resume || (e.Mode == PowerModes.StatusChange && acChanged))
+            {
+                Charger.PlugChanged();
                 _ui.Post(_ => ScheduleAuto(2500), null);   // let Lenovo's dispatcher settle first
+            }
+            else if (e.Mode == PowerModes.StatusChange && line == PowerLineStatus.Online)
+                _ui.Post(_ => CheckCharger(), null);
             if (e.Mode == PowerModes.Resume)
                 _ui.Post(_ => { RestartColorDebounce(); _ = Task.Run(() => TouchpadGuard.Check(startup: true)); }, null);
+        }
+
+        /// A charger swap that never drops AC (e.g. the barrel added while on USB-C, or pulled while docked) raises no
+        /// AC event, so the charger is re-read on the events that do happen: battery status changes, Lenovo's dispatcher
+        /// switching the mode, and opening the panel or menu. One EC read (~20 ms) each; no timer.
+        void CheckCharger()
+        {
+            if (_test || !Its.OnAC) return;
+            Charger.Invalidate();
+            if (Charger.Current != _chargerSeen) ScheduleAuto(1500);
         }
 
         void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -663,7 +688,7 @@ namespace TBMini
             foreach (var m in new[] { PowerMode.Saver, PowerMode.Auto, PowerMode.Performance, PowerMode.Geek })
             {
                 bool geekOff = m == PowerMode.Geek && !Its.GeekAvailable;
-                string why = geekOff ? (Charger.Current == ChargerKind.Slow ? T("（需原装大功率适配器）", " (needs the full-power adapter)") : T("（需接电源）", " (needs AC power)")) : "";
+                string why = geekOff ? (Charger.Limited(Charger.Current) ? T("（需原装大功率适配器）", " (needs the full-power adapter)") : T("（需接电源）", " (needs AC power)")) : "";
                 var it = new ToolStripMenuItem(Its.Name(m) + why) { Checked = _power == m && !_autoPower, Enabled = !_busy && !geekOff };
                 var mm = m; it.Click += (s, e) => SetPower(mm);
                 _menu.Items.Add(it);
@@ -770,6 +795,7 @@ namespace TBMini
         {
             if (_panel.Visible) { _panel.Hide(); return; }
             if (unchecked(Environment.TickCount - _panel.HiddenAt) < 300) return;   // this click just closed it
+            CheckCharger();
             _panel.ShowNearCursor();
             RefreshFeatures();
             _ = RefreshGpuAsync();

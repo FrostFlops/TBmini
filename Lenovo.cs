@@ -19,33 +19,86 @@ namespace TBMini
     // ---------------------------------------------------------------------------------------------
     public enum PowerMode { Unknown = -1, Auto = 0, Saver = 1, Performance = 3, Geek = 4 }
 
-    public enum ChargerKind { None, Slow, Full }
+    public enum ChargerKind { None, Weak, Slow, Full }
 
-    /// What powers the laptop: battery, a charger Windows reports as inadequate ("slow charger connected",
-    /// e.g. a ~100 W USB-C PD charger), or the full-power adapter. Uses Windows.System.Power.PowerManager through the
-    /// .NET Framework WinRT bridge (no extra dependency); without it every charger counts as full-power.
+    /// What powers the laptop:
+    ///   None - battery.
+    ///   Weak - a charger that cannot keep up: Windows reports PowerSupplyStatus.Inadequate (the battery discharges while
+    ///          plugged in, e.g. a 45 W USB-C PD charger). Latched until AC drops (every charger unplugged), the laptop
+    ///          resumes, the barrel adapter is seen, or auto adjust is switched on again: Inadequate depends on load,
+    ///          and switching to Saver would otherwise flip it straight back.
+    ///   Slow - any USB-C PD charger (Lenovo's adapter type, see AdapterType). Windows calls these Adequate even though
+    ///          it shows its "slow charger" toast for them.
+    ///   Full - the full-power barrel adapter.
     public static class Charger
     {
         static readonly Type Pm = Type.GetType("Windows.System.Power.PowerManager, Windows.System.Power, ContentType=WindowsRuntime", false);
         static readonly System.Reflection.PropertyInfo Supply = Pm?.GetProperty("PowerSupplyStatus");
+        static volatile bool _weak;          // Inadequate was seen since the charger was plugged in
 
         public static ChargerKind Current
         {
             get
             {
-                if (SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) return ChargerKind.None;
-                try
-                {
-                    var v = Supply?.GetValue(null);
-                    if (v != null && Convert.ToInt32(v) == 1 /*PowerSupplyStatus.Inadequate*/) return ChargerKind.Slow;
-                }
-                catch { }
-                return ChargerKind.Full;
+                if (SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) { _weak = false; return ChargerKind.None; }
+                int adapter = AdapterType();
+                if (adapter == 0) { _weak = false; return ChargerKind.Full; }   // the barrel is never "weak", whatever the load
+                if (adapter == 1) return ChargerKind.Weak;      // Lenovo: "not supported", too weak to run the laptop
+                if (SupplyInadequate()) _weak = true;
+                if (_weak) return ChargerKind.Weak;
+                return adapter > 0 ? ChargerKind.Slow : ChargerKind.Full;   // -1: no Lenovo signal, nothing says it is slow
             }
         }
 
+        public static bool Limited(ChargerKind k) => k == ChargerKind.Weak || k == ChargerKind.Slow;
+
+        static bool SupplyInadequate()
+        {
+            try { var v = Supply?.GetValue(null); return v != null && Convert.ToInt32(v) == 1; /*PowerSupplyStatus.Inadequate*/ }
+            catch { return false; }
+        }
+
+        // GBMD (EnergyDrv IOCTL_BATTERY, input 0xFF) reports the EC's adapter type ADPI (EC 0xA3 bits 4-5):
+        // 1 -> bit 0x8000, 2 -> bit 0x10000, 0 -> neither. Lenovo Vantage (PowerBattery.dll CAdapter::GetAdapterStatus,
+        // switch on v & 0x18000) reads 0 as Full, 0x10000 as Limited, 0x8000 as None/NotSupported, both as unknown.
+        // Measured on the ThinkBook 16p G6: 0 on the 300 W barrel adapter, 0x10000 on every USB-C PD charger
+        // (45, 65 and 100 W alike). Bit 0x800000 is always set once the EC was read, so a reply without it
+        // (EC not ready / mutex timeout) is not trusted.
+        const uint GbmdAdapter1 = 0x8000, GbmdAdapter2 = 0x10000, GbmdEcRead = 0x800000;
+        static readonly object AdapterGate = new object();
+        static int _adapter = -1, _adapterTick, _lastGood = -1;
+        static bool _adapterCached;
+
+        /// Lenovo adapter type: 0 = full-power adapter (or none), 2 = limited (any USB-C PD charger here),
+        /// 1 = not supported (too weak), 3 = both bits (undefined, treated as limited), -1 = unknown.
+        /// A failed read keeps the last good value. Cached for a second: the panel asks several times per refresh
+        /// and each EC call takes ~20 ms.
+        public static int AdapterType()
+        {
+            lock (AdapterGate)
+            {
+                int now = Environment.TickCount;
+                if (_adapterCached && unchecked(now - _adapterTick) < 1000) return _adapter;
+                int v = _lastGood;
+                try
+                {
+                    uint r = EnergyDrv.Call(EnergyDrv.IOCTL_BATTERY, 0xFF);
+                    if ((r & GbmdEcRead) != 0) v = _lastGood = ((r & GbmdAdapter1) != 0 ? 1 : 0) | ((r & GbmdAdapter2) != 0 ? 2 : 0);
+                }
+                catch { }
+                _adapter = v; _adapterTick = now; _adapterCached = true;
+                return v;
+            }
+        }
+
+        /// Drops the cached adapter type so the next read goes to the EC (call when a charger event arrives).
+        public static void Invalidate() { lock (AdapterGate) _adapterCached = false; }
+
+        /// AC was plugged or unplugged: a new charger starts un-latched.
+        public static void PlugChanged() { _weak = false; Invalidate(); }
+
         /// changed runs (on a thread-pool thread) when Windows reports a different power supply status. Event-driven:
-        /// nothing polls in the background.
+        /// nothing polls in the background. (Lenovo's LENOVO_AC_PD_EVENT exists in WMI but has no provider here.)
         public static bool Subscribe(Action changed)
         {
             try
@@ -57,7 +110,7 @@ namespace TBMini
                     typeof(Func<EventHandler<object>, System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>), ev.GetAddMethod());
                 var remove = (Action<System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>)Delegate.CreateDelegate(
                     typeof(Action<System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>), ev.GetRemoveMethod());
-                System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeMarshal.AddEventHandler(add, remove, new EventHandler<object>((s, e) => changed()));
+                System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeMarshal.AddEventHandler(add, remove, new EventHandler<object>((s, e) => { Invalidate(); changed(); }));
                 return true;
             }
             catch { return false; }
@@ -110,12 +163,13 @@ namespace TBMini
 
         public static bool OnAC => SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Online;
 
-        /// Geek needs the full-power adapter: not on battery, and not on a charger Windows calls slow (e.g. ~100 W USB-C PD).
-        public static bool GeekAvailable => GeekSupported && OnAC && !GeekGreyed && Charger.Current != ChargerKind.Slow;
+        /// Geek needs the full-power adapter: not on battery, and not on a USB-C PD charger or one that cannot keep up.
+        public static bool GeekAvailable => GeekSupported && OnAC && !GeekGreyed && !Charger.Limited(Charger.Current);
 
         public static string GeekUnavailableText() =>
             !GeekSupported ? T("这台机器不支持极客模式", "Geek mode is not supported on this machine")
-            : Charger.Current == ChargerKind.Slow ? T("极客模式需要原装大功率适配器（当前是慢速充电器）", "Geek mode needs the full-power adapter (a slow charger is connected)")
+            : Charger.Current == ChargerKind.Weak ? T("极客模式需要原装大功率适配器（当前充电器功率不足，接着电时电池曾在放电）", "Geek mode needs the full-power adapter (this charger couldn't keep up: the battery drained while plugged in)")
+            : Charger.Current == ChargerKind.Slow ? T("极客模式需要原装大功率适配器（当前是 USB-C 慢速充电器）", "Geek mode needs the full-power adapter (a USB-C slow charger is connected)")
             : !OnAC ? T("极客模式只能在接电源时使用", "Geek mode is only available on AC power")
             : T("联想服务暂时禁用了极客模式", "Lenovo's service has Geek mode greyed out right now");
 

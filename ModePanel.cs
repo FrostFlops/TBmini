@@ -253,7 +253,7 @@ namespace TBMini
                 t.Click += (s, e) => _app.SetPower(m);
                 _pt[i] = t; _cardPerf.Controls.Add(t);
             }
-            // auto adjust: saver on battery, performance on a slow charger, geek on the full-power adapter
+            // auto adjust: saver on battery or a charger that can't keep up, performance on USB-C, geek on the full-power adapter
             _autoTile = new Tile { Glyph = Glyph.Adapt, Accent = Color.FromArgb(0x06, 0xB6, 0xD4), Font = _tileText, Ui = _s };
             _autoTile.Click += (s, e) => _app.SetAutoPower(!_app.AutoPower);
             _cardPerf.Controls.Add(_autoTile);
@@ -292,8 +292,8 @@ namespace TBMini
             _tip.SetToolTip(_pt[1], T("智能：按负载自动调节", "Smart: adjusts to the load"));
             _tip.SetToolTip(_pt[2], T("性能：高功耗释放", "Performance: higher power limits"));
             _autoTile.Text = T("自动调节", "Auto adjust");
-            _tip.SetToolTip(_autoTile, T("自动调节：用电池时「省电」，接慢速充电器（如 100W PD）时「性能」，接原装大功率适配器时「极客」。只在插拔电源时切换，不在后台轮询；手动选择模式会关闭它",
-                                         "Auto adjust: Saver on battery, Performance on a slow charger (e.g. 100 W USB-C PD), Geek on the full-power adapter. Switches only when the power source changes (no background polling); picking a mode yourself turns it off"));
+            _tip.SetToolTip(_autoTile, T("自动调节：用电池或充电器功率不足（插着电电池仍在放电，如 45W）时「省电」，接 USB-C 充电器（如 65/100W PD）时「性能」，接原装大功率适配器时「极客」。功率不足的判断会保持到拔掉充电器为止（重负载下 65/100W 也可能触发）。只在电源变化或 Windows 报告供电不足时切换，不在后台轮询；手动选择模式会关闭它",
+                                         "Auto adjust: Saver on battery or on a charger that can't keep up (the battery drains while plugged in, e.g. 45 W), Performance on a USB-C charger (e.g. 65/100 W PD), Geek on the full-power adapter. A charger that couldn't keep up stays in Saver until you unplug it (a 65/100 W one can hit this under heavy load). Switches only when the power source changes or Windows reports the charger can't keep up (no background polling); picking a mode yourself turns it off"));
             _tip.SetToolTip(_gt[0], T("混合：内屏走核显，独显按需工作（切入/切出独显直连要重启）",
                                       "Hybrid: the display runs on the iGPU and the dGPU works on demand (switching to or from dGPU direct needs a restart)"));
             _tip.SetToolTip(_gt[1], T("集显：混合模式下关掉独显，不用重启；独显被占用时不会生效",
@@ -838,8 +838,8 @@ namespace TBMini
             string line = "";
             if (!Its.Supported) line = T("没找到联想 ITS 服务，性能模式不可用", "Lenovo ITS service not found; performance modes are unavailable");
             if (busy) line = Join(line, T("切换中…", "Switching…"));
-            // a disabled Geek tile shows no tooltip, so say why here when a slow charger is the reason
-            if (Its.GeekSupported && !geekOk && !busy && Charger.Current == ChargerKind.Slow) line = Join(line, Its.GeekUnavailableText());
+            // a disabled Geek tile shows no tooltip, so say why here when the charger is the reason
+            if (Its.GeekSupported && !geekOk && !busy && Charger.Limited(Charger.Current)) line = Join(line, Its.GeekUnavailableText());
             if (!Program.IsAdmin) line = Join(line, T("显卡和 BIOS 项需要管理员权限（点显卡按钮可提权）", "GPU and BIOS settings need administrator rights (click a GPU button to elevate)"));
             else if (gi.Error != null) line = Join(line, T("显卡：", "GPU: ") + gi.Error);
             else if (!gi.RunningKnown) line = Join(line, T("内屏未点亮，显卡按 BIOS 显示", "Internal display off; GPU mode shown from BIOS"));
