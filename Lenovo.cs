@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Management;
 using System.Runtime.InteropServices;
@@ -21,6 +21,36 @@ namespace TBMini
 
     public enum ChargerKind { None, Weak, Slow, Full }
 
+    /// USB-C PD charger class, as far as the dGPU is concerned. Lenovo's EC caps the dGPU on USB-C power by the charger's
+    /// wattage (an NVIDIA D-level notify): about 15 W on 65 W or less, about 30 W on 100 W.
+    public enum PdClass { Unknown, Upto65, Upto100 }
+
+    /// LENOVO_OTHER_METHOD (root\WMI, admin). Only GetFeatureValue is used: on this BIOS its ASL just reads stored values
+    /// (no EC writes). SetFeatureValue writes EC/MMIO and is deliberately not wrapped.
+    public static class OtherMethod
+    {
+        public const uint CpuPl2 = 0x01010000, CpuPl1 = 0x01020000;   // the CPU power limits the EC programmed, in W
+
+        public static uint? Get(uint id)
+        {
+            try
+            {
+                using var s = new ManagementObjectSearcher(@"root\WMI", "SELECT * FROM LENOVO_OTHER_METHOD");
+                foreach (ManagementObject o in s.Get())
+                    using (o)
+                    {
+                        var p = o.GetMethodParameters("GetFeatureValue");
+                        p["IDs"] = id;
+                        using var r = o.InvokeMethod("GetFeatureValue", p, null);
+                        uint v = r?["value"] == null ? 0u : Convert.ToUInt32(r["value"]);
+                        return v == 0 || v > 500 ? (uint?)null : v;    // 0 = unsupported / not ready; anything huge is junk
+                    }
+            }
+            catch { }
+            return null;
+        }
+    }
+
     /// What powers the laptop:
     ///   None - battery.
     ///   Weak - a charger that cannot keep up: Windows reports PowerSupplyStatus.Inadequate (the battery discharges while
@@ -42,6 +72,7 @@ namespace TBMini
             {
                 if (SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) { _weak = false; return ChargerKind.None; }
                 int adapter = AdapterType();
+                if (adapter < 0 && _seenValid) return ChargerKind.Slow;        // Lenovo signal briefly unreadable: no Geek until known
                 if (adapter == 0) { _weak = false; return ChargerKind.Full; }   // the barrel is never "weak", whatever the load
                 if (adapter == 1) return ChargerKind.Weak;      // Lenovo: "not supported", too weak to run the laptop
                 if (SupplyInadequate()) _weak = true;
@@ -67,6 +98,7 @@ namespace TBMini
         const uint GbmdAdapter1 = 0x8000, GbmdAdapter2 = 0x10000, GbmdEcRead = 0x800000;
         static readonly object AdapterGate = new object();
         static int _adapter = -1, _adapterTick, _lastGood = -1;
+        static volatile bool _seenValid;      // EnergyDrv has answered on this machine (so -1 means "not known yet", not "no Lenovo")
         static bool _adapterCached;
 
         /// Lenovo adapter type: 0 = full-power adapter (or none), 2 = limited (any USB-C PD charger here),
@@ -83,7 +115,7 @@ namespace TBMini
                 try
                 {
                     uint r = EnergyDrv.Call(EnergyDrv.IOCTL_BATTERY, 0xFF);
-                    if ((r & GbmdEcRead) != 0) v = _lastGood = ((r & GbmdAdapter1) != 0 ? 1 : 0) | ((r & GbmdAdapter2) != 0 ? 2 : 0);
+                    if ((r & GbmdEcRead) != 0) { v = _lastGood = ((r & GbmdAdapter1) != 0 ? 1 : 0) | ((r & GbmdAdapter2) != 0 ? 2 : 0); _seenValid = true; }
                 }
                 catch { }
                 _adapter = v; _adapterTick = now; _adapterCached = true;
@@ -95,7 +127,66 @@ namespace TBMini
         public static void Invalidate() { lock (AdapterGate) _adapterCached = false; }
 
         /// AC was plugged or unplugged: a new charger starts un-latched.
-        public static void PlugChanged() { _weak = false; Invalidate(); }
+        public static void PlugChanged()
+        {
+            Interlocked.Increment(ref _gen); _weak = false; _pd = 0;
+            lock (AdapterGate) { _lastGood = -1; _adapterCached = false; }   // never fall back to the previous charger's type
+        }
+
+        static volatile int _pd;   // PdClass latched for the current plug-in (0 = not classified yet)
+        static int _gen;           // bumped by PlugChanged: a classification that straddles a plug change is dropped
+
+        /// Which USB-C class the charger is in. The PD contract itself is not readable, but the EC programs the CPU power
+        /// limits per charger, measured on this ThinkBook (PL1/PL2 in W):
+        ///   65 W PD: 30/45 in every mode;  100 W PD: 45/60 in Smart/Performance, 30/45 in Saver;  barrel: 125+/180+.
+        /// So a stable PL2 of 55..90 means 100 W, in any mode it was read in. PL2 <= 50 means 65 W or less only outside
+        /// Saver: in Saver a 100 W charger reads like that too. Then the dGPU's own cap decides if it is awake (the EC's
+        /// D-level: about 15 W on 65 W or less, about 30 W on 100 W). Failing that, a charger Windows flags as not keeping
+        /// up (Weak) counts as small: a 100 W one only falls behind with the dGPU busy, and then the dGPU is awake. Lenovo's
+        /// "not supported" adapter type counts as small too. Without admin (no CPU limits) only the dGPU cap and Weak are
+        /// used. Latched until the charger changes. Blocking (1-3 s): call off the UI thread.
+        public static PdClass ClassifyPd()
+        {
+            if (_pd != 0) return (PdClass)_pd;
+            int gen = Volatile.Read(ref _gen);
+            if (SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) return PdClass.Unknown;
+            int a = AdapterType();
+            if (a <= 0) return PdClass.Unknown;                              // barrel adapter, unknown, or no Lenovo signal
+            if (a == 1) return Latch(PdClass.Upto65, gen);
+            if (Program.IsAdmin)
+            {
+                // two equal readings a second apart: the limits land ~1 s after a plug-in or a mode change (auto adjust may
+                // be switching right now), so retry a couple of times before giving up
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    bool saverBefore = Its.Read() == PowerMode.Saver;
+                    uint? first = OtherMethod.Get(OtherMethod.CpuPl2);
+                    Thread.Sleep(1000);
+                    uint? second = OtherMethod.Get(OtherMethod.CpuPl2);
+                    if (first == null || second == null) break;
+                    if (first != second) continue;
+                    if (first >= 55 && first <= 90) return Latch(PdClass.Upto100, gen);   // only a 100 W charger gives this
+                    if (first <= 50 && !saverBefore && Its.Read() != PowerMode.Saver) return Latch(PdClass.Upto65, gen);
+                    if (first <= 50) break;                                   // Saver: 65 W and 100 W look the same
+                    // anything else (e.g. barrel-level limits still in place right after a swap): read again
+                }
+            }
+            int? cap = Sensors.DgpuPowerLimitW();
+            if (cap is int w && w > 5)
+            {
+                if (w <= 20) return Latch(PdClass.Upto65, gen);
+                if (w <= 40) return Latch(PdClass.Upto100, gen);
+            }
+            if (Current == ChargerKind.Weak) return Latch(PdClass.Upto65, gen);
+            return PdClass.Unknown;
+        }
+
+        static PdClass Latch(PdClass c, int gen)
+        {
+            if (Volatile.Read(ref _gen) != gen || SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) return PdClass.Unknown;
+            _pd = (int)c;
+            return c;
+        }
 
         /// changed runs (on a thread-pool thread) when Windows reports a different power supply status. Event-driven:
         /// nothing polls in the background. (Lenovo's LENOVO_AC_PD_EVENT exists in WMI but has no provider here.)
@@ -115,6 +206,51 @@ namespace TBMini
             }
             catch { return false; }
         }
+    }
+
+    /// Windows' "Power mode" (Settings > Power) is stored separately for plugged in and on battery. Lenovo's dispatcher
+    /// (Policy_FNSyncPowerMode = 1) syncs both ways: a Lenovo mode change writes the power mode of the source in use
+    /// (Smart = Balanced, Saver = Best power efficiency, Performance = Best performance), and when the source changes
+    /// Windows switches to the other source's stored power mode and the dispatcher follows it, so a plug or unplug
+    /// changes the Lenovo mode by itself. Keeping both stored power modes equal leaves it nothing to follow.
+    public static class WinPowerMode
+    {
+        [DllImport("powrprof.dll")] static extern uint PowerGetUserConfiguredACPowerMode(out Guid g);
+        [DllImport("powrprof.dll")] static extern uint PowerGetUserConfiguredDCPowerMode(out Guid g);
+        [DllImport("powrprof.dll")] static extern uint PowerSetUserConfiguredACPowerMode(ref Guid g);
+        [DllImport("powrprof.dll")] static extern uint PowerSetUserConfiguredDCPowerMode(ref Guid g);
+
+        /// Copies the power mode stored for the source in use now to the other source (the stored value, not the effective
+        /// one, so Energy Saver on battery is not copied into "plugged in"). True if it changed something. Windows 11 24H2+;
+        /// does nothing on older builds.
+        public static bool Unify()
+        {
+            try
+            {
+                bool onAc = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Online;
+                if (PowerGetUserConfiguredACPowerMode(out Guid ac) != 0 || PowerGetUserConfiguredDCPowerMode(out Guid dc) != 0) return false;
+                if (ac == dc) return false;
+                Guid g = onAc ? ac : dc;
+                return (onAc ? PowerSetUserConfiguredDCPowerMode(ref g) : PowerSetUserConfiguredACPowerMode(ref g)) == 0;
+            }
+            catch { return false; }   // EntryPointNotFoundException before 24H2
+        }
+
+        public static string Describe()
+        {
+            try
+            {
+                if (PowerGetUserConfiguredACPowerMode(out Guid ac) != 0 || PowerGetUserConfiguredDCPowerMode(out Guid dc) != 0) return "n/a";
+                return "ac=" + Name(ac) + " dc=" + Name(dc);
+            }
+            catch { return "n/a"; }
+        }
+
+        static string Name(Guid g) =>
+            g == Guid.Empty ? "balanced"
+            : g == new Guid("961cc777-2547-4f9d-8174-7d86181b8a7a") ? "best-efficiency"
+            : g == new Guid("ded574b5-45a0-4f42-8737-46345c09c238") ? "best-performance"
+            : g.ToString();
     }
 
     public static class Its

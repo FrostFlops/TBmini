@@ -37,7 +37,7 @@ namespace TBMini
         Icon _currentIcon;
         readonly Dictionary<string, FeatureState> _fstate = new Dictionary<string, FeatureState>();
         System.Windows.Forms.Timer _colorDebounce;
-        static int _reconciling;
+        static int _reconciling, _reconcileAgain;
 #if TBMINI_DEV
         readonly bool _test;                     // dev preview: read-only, no automatic writes
         public TrayApp(bool testMode = false)
@@ -77,6 +77,12 @@ namespace TBMini
             _autoPower = Registry.GetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", 0) is int ap && ap == 1;
             _autoTimer = new System.Windows.Forms.Timer();
             _autoTimer.Tick += (s, e) => AutoTick();
+            _usbcTimer = new System.Windows.Forms.Timer();
+            _usbcTimer.Tick += (s, e) => UsbcTick();
+            // after a mode change settles, give plugged-in and battery the same Windows power mode, so a plug / unplug
+            // does not make Lenovo's dispatcher change the mode by itself
+            _unifyTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _unifyTimer.Tick += (s, e) => { _unifyTimer.Stop(); _ = Task.Run(() => WinPowerMode.Unify()); };
             Charger.Subscribe(() => _ui.Post(_ => { PollPower(force: true); ScheduleAuto(1500); }, null));
 
             PollPower(force: true);
@@ -99,6 +105,7 @@ namespace TBMini
         {
             _autoPower = on;
             try { Registry.SetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", on ? 1 : 0, RegistryValueKind.DWord); } catch { }
+            if (!on) GpuAuto.Save(GpuAuto.St.None);        // off: forget any GPU switch it made (nothing will be undone)
             if (on) Charger.PlugChanged();   // turning it on re-evaluates the charger from scratch (clears the Weak latch)
             _panel.UpdateView();
             if (on) ApplyAuto();
@@ -143,12 +150,15 @@ namespace TBMini
         }
 
         // ------------------------------------------------------------------ state
+        readonly System.Windows.Forms.Timer _unifyTimer;
+
         /// Returns true when the mode or AC state changed.
         bool PollPower(bool force = false)
         {
             var p = Its.Read();
             bool ac = Its.OnAC;
             bool changed = p != _power || ac != _ac;
+            if (p != _power && p != PowerMode.Unknown && !_test) { _unifyTimer.Stop(); _unifyTimer.Start(); }
             if (!force && !changed) return false;
             _power = p; _ac = ac;
             UpdateIcon();
@@ -170,6 +180,16 @@ namespace TBMini
             {
                 Charger.PlugChanged();
                 _ui.Post(_ => ScheduleAuto(2500), null);   // let Lenovo's dispatcher settle first
+                // dGPU on USB-C power: a charger connected (also while asleep) gets notices and switches; otherwise only
+                // TBMini's own switches are undone. On resume the adapter type before sleep tells a swap made while asleep.
+                bool plugged = line == PowerLineStatus.Online && acChanged;
+                bool resume = e.Mode == PowerModes.Resume;
+                _ui.Post(_ =>
+                {
+                    _adapterBefore = resume ? _adapterSeen : -2;
+                    _plugGen++; _adapterSeen = -2;
+                    ScheduleUsbc(plugged ? 4000 : 3000, plugged);
+                }, null);
             }
             else if (e.Mode == PowerModes.StatusChange && line == PowerLineStatus.Online)
                 _ui.Post(_ => CheckCharger(), null);
@@ -185,6 +205,198 @@ namespace TBMini
             if (_test || !Its.OnAC) return;
             Charger.Invalidate();
             if (Charger.Current != _chargerSeen) ScheduleAuto(1500);
+            int a = Charger.AdapterType();
+            if (a < 0) return;
+            if (_adapterSeen == -2) { if (!_usbcTimer.Enabled && !_usbcRunning && !_usbcPending) _adapterSeen = a; return; }   // a plug check owns it
+            if (a == _adapterSeen) return;
+            // a different charger took over without AC dropping: treat it as connecting that charger
+            _adapterSeen = a;
+            Charger.PlugChanged();
+            _plugGen++;
+            ScheduleUsbc(1500, plugged: true);
+        }
+
+        // ------------------------------------------------------------------ dGPU on USB-C power
+        // Lenovo's EC caps the dGPU on USB-C power by the charger's wattage (NVIDIA D-level notify): about 15 W on 65 W or
+        // less, which is slower than the iGPU, and about 30 W on 100 W. On connecting a charger TBMini says so; the GPU
+        // switching itself is the GpuAuto state machine (see GpuAuto.cs). dGPU direct can only be told (switching needs a
+        // restart); iGPU only needs no notice.
+        readonly System.Windows.Forms.Timer _usbcTimer;
+        bool _usbcPlugged, _usbcRunning, _usbcPending, _usbcQuiet, _usbcRetrying, _usbcLidSkipped;
+        int _usbcFails, _plugGen;
+        int _adapterSeen = -2;        // Lenovo adapter type the last check saw (-2: not known / a plug check is pending)
+        int _adapterBefore = -2;      // on resume: the adapter type before sleep (a different one means a swap while asleep)
+
+        void ScheduleUsbc(int ms, bool plugged)
+        {
+            if (_test) return;
+            // a charger connect not handled yet is not downgraded by a resume / startup recheck that follows it
+            // (but a quiet retry of a handled one is, and AC going away never keeps it)
+            bool keepConnect = _usbcPlugged && !_usbcRetrying && Its.OnAC && (_usbcTimer.Enabled || _usbcRunning || _usbcPending);
+            _usbcPlugged = plugged || keepConnect; _usbcQuiet = false; _usbcRetrying = false; _usbcFails = 0; _usbcPending = false;
+            _usbcTimer.Stop(); _usbcTimer.Interval = ms; _usbcTimer.Start();
+        }
+
+        /// A GPU or power switch is running: run the check when it finishes (RunPendingPower calls RunPendingUsbc).
+        void DeferUsbc() { _usbcPending = true; _usbcTimer.Stop(); }
+
+        void RunPendingUsbc()
+        {
+            if (!_usbcPending || _busy) return;
+            _usbcPending = false;
+            _usbcTimer.Stop(); _usbcTimer.Interval = 500; _usbcTimer.Start();
+        }
+
+        /// The switch failed (e.g. a game holds the dGPU): try again quietly a few times, 30 s apart.
+        void RetryUsbcLater()
+        {
+            if (++_usbcFails > 10) return;
+            _usbcQuiet = true; _usbcRetrying = true;
+            _usbcTimer.Stop(); _usbcTimer.Interval = 30000; _usbcTimer.Start();
+        }
+
+        /// The user picked a GPU mode: drop any queued automatic GPU work (a retry must not undo the user's choice).
+        void CancelUsbc()
+        {
+            _usbcTimer.Stop();
+            _usbcPending = _usbcPlugged = _usbcQuiet = _usbcRetrying = _usbcLidSkipped = false;
+            _usbcFails = 0;
+            _plugGen++;                                                       // a check in flight stops at its next Stale()
+        }
+
+        void UsbcTick()
+        {
+            _usbcTimer.Stop();
+            if (_busy || _usbcRunning) { DeferUsbc(); return; }              // after the running switch
+            _ = CheckUsbcAsync(_usbcPlugged);
+        }
+
+        async Task CheckUsbcAsync(bool plugged)
+        {
+            if (_test) return;
+            _usbcRunning = true;
+            try
+            {
+                int gen = _plugGen;
+                bool online = Its.OnAC;
+                bool Stale() => gen != _plugGen || Its.OnAC != online;      // the charger changed while this ran
+                int adapter = online ? await Task.Run(() => { Charger.Invalidate(); return Charger.AdapterType(); }) : 0;
+                if (Stale()) return;
+                if (adapter >= 0) _adapterSeen = online ? adapter : 0;
+                if (!plugged && online && _adapterBefore >= 0 && adapter >= 0 && adapter != _adapterBefore) plugged = true;   // swapped while asleep
+                _adapterBefore = -2;
+                bool quiet = _usbcQuiet; _usbcQuiet = false; _usbcRetrying = false;
+                bool usbc = online && adapter > 0, barrel = online && adapter == 0;
+                var pd = usbc ? await Task.Run(Charger.ClassifyPd) : PdClass.Unknown;
+                if (Stale()) return;
+
+                var chg = !online ? GpuAuto.Chg.Battery
+                        : barrel || pd == PdClass.Upto100 ? GpuAuto.Chg.Strong
+                        : pd == PdClass.Upto65 ? GpuAuto.Chg.Small
+                        : GpuAuto.Chg.Unknown;
+                var ev = plugged ? GpuAuto.Ev.Connect : !online ? GpuAuto.Ev.Battery : GpuAuto.Ev.Recheck;
+
+                await RefreshGpuAsync();
+                if (Stale()) return;
+                var mode = _gpu.Mode;                                          // before any switch, for the notice
+                var st = GpuAuto.Load();
+                var d = GpuAuto.Decide(ev, chg, mode, st, _autoPower);
+                string switched = null;
+                bool failed = false;
+                if (d.Target is int target && _gpu.PanelOnDgpu == null) _usbcLidSkipped = true;   // panel off (lid closed): mux unverifiable; re-check when it is back
+                else if (d.Target is int target2)
+                {
+                    var r = await SwitchIgpuQuiet(target2);
+                    if (r == null) { _usbcPlugged = plugged; _usbcQuiet = quiet; DeferUsbc(); return; }   // after the running switch
+                    if (r == true) { GpuAuto.Save(d.Next); switched = Gpu.Name(Gpu.SubMode(target2)); }
+                    else
+                    {
+                        if (Stale()) return;                                  // a newer charger event owns the timer now
+                        failed = true; _usbcPlugged = plugged; RetryUsbcLater();   // keep the old state; retry quietly
+                    }
+                }
+                else if (d.Next != st) GpuAuto.Save(d.Next);
+                if (Stale()) return;
+                string failText = failed ? T("没能切到「" + Gpu.Name(Gpu.SubMode(d.Target.Value)) + "」（独显可能被占用，稍后会再试）。",
+                                             " Could not switch to " + Gpu.Name(Gpu.SubMode(d.Target.Value)) + " (the dGPU may be in use; it will try again).") : "";
+                if (quiet) { if (switched != null) Balloon(T("显卡已切到「" + switched + "」", "GPU switched to " + switched)); return; }
+
+                if (ev != GpuAuto.Ev.Connect)
+                {
+                    if (switched != null) Balloon(T("显卡已切回「" + switched + "」", "GPU switched back to " + switched));
+                    else if (failed) Balloon(failText.Trim(), ToolTipIcon.Warning);
+                    return;
+                }
+
+                // ---- notices on connecting a charger (nothing in iGPU only: the dGPU is off) ----
+                bool direct = mode == GpuMode.Discrete;
+                // without admin the iGPU sub-mode is unreadable: Switchable with the dGPU present is Hybrid enough for a notice
+                bool hybrid = mode == GpuMode.Hybrid || mode == GpuMode.Auto
+                              || (mode == GpuMode.Unknown && !Program.IsAdmin && _gpu.PanelOnDgpu == false && await Task.Run(Gpu.DgpuPresent));
+                if (Stale()) return;
+                // what the switch (if any) means: TBMini's own override, or the user's mode given back
+                bool overrode = switched != null && d.Next != GpuAuto.St.None;
+                string switchText = switched == null ? ""
+                    : d.Next == GpuAuto.St.ToHybrid ? T("已切到「" + switched + "」，拔掉后切回集显。", " Switched to " + switched + "; back to iGPU only when you unplug.")
+                    : !overrode ? T("显卡已切回「" + switched + "」。", " Switched back to " + switched + ".")
+                    : "";
+
+                if (chg == GpuAuto.Chg.Small)
+                {
+                    if (direct)
+                        Balloon(T("USB-C 充电器（≤65W）：固件把独显限制在约 15W。独显直连要重启才能切换，玩游戏请用原装适配器或电池。",
+                                  "USB-C charger (65 W or less): firmware limits the dGPU to about 15 W. dGPU direct can't switch without a restart; for games use the 300 W adapter or battery."), ToolTipIcon.Warning);
+                    else if (overrode)
+                        Balloon(T("USB-C 充电器（≤65W）：固件把独显限制在约 15W，比核显还慢，已切到集显。回到电池或接大功率电源时切回。",
+                                  "USB-C charger (65 W or less): firmware limits the dGPU to about 15 W, slower than the iGPU, so it switched to iGPU only. It switches back on battery or a stronger charger."), ToolTipIcon.Warning);
+                    else if (switched != null || failed)
+                        Balloon(T("USB-C 充电器（≤65W）：固件把独显限制在约 15W，比核显还慢。" + switchText + failText,
+                                  "USB-C charger (65 W or less): firmware limits the dGPU to about 15 W, slower than the iGPU." + switchText + failText), ToolTipIcon.Warning);
+                    else if (hybrid)
+                        Balloon(T("USB-C 充电器（≤65W）：固件把独显限制在约 15W，比核显还慢。玩游戏请用原装适配器或电池，或切到集显。",
+                                  "USB-C charger (65 W or less): firmware limits the dGPU to about 15 W, slower than the iGPU. For games use the 300 W adapter or battery, or switch to iGPU only."), ToolTipIcon.Warning);
+                }
+                else if (chg == GpuAuto.Chg.Strong && usbc)
+                {
+                    if (direct || hybrid || switched != null || failed)
+                        Balloon(T("USB-C 充电器（100W）：固件把独显限制在约 30W，满性能请用原装适配器。" + switchText + failText,
+                                  "USB-C charger (100 W): firmware limits the dGPU to about 30 W; use the 300 W adapter for full performance." + switchText + failText));
+                }
+                else if (chg == GpuAuto.Chg.Strong && (switched != null || failed))
+                    Balloon(T("原装适配器：" + switchText + failText, "Full-power adapter:" + switchText + failText));
+                else if (chg == GpuAuto.Chg.Unknown && (direct || hybrid))
+                    Balloon(T("USB-C 充电器：固件会限制独显（≤65W 约 15W，100W 约 30W），满性能请用原装适配器。",
+                              "USB-C charger: firmware limits the dGPU (65 W or less: about 15 W, 100 W: about 30 W); use the 300 W adapter for full performance."));
+            }
+            finally { _usbcRunning = false; RunPendingUsbc(); }
+        }
+
+        /// Live switch inside Switchable Graphics (0 Hybrid, 1 iGPU only, 2 Auto) for auto adjust: no dialogs, no reboot
+        /// path. null = busy (try again later); false = could not (not admin, not running Switchable, the mux state is only
+        /// inferred because the internal panel is off, a BIOS graphics change waits for a restart, or the read-back did not
+        /// match, e.g. an app holds the dGPU).
+        async Task<bool?> SwitchIgpuQuiet(int igpu)
+        {
+            if (!Program.IsAdmin) return false;
+            if (_busy) return null;
+            _busy = true; _panel.UpdateView();
+            bool ok = false; int before = -1;
+            try
+            {
+                ok = await Task.Run(() =>
+                {
+                    var s = Gpu.Snapshot();
+                    if (!s.RunningKnown || s.PanelOnDgpu != false || s.Running != Gpu.BiosSwitchable) return false;
+                    if (Gpu.Family(s.Staged) != Gpu.BiosSwitchable || s.PendingReboot || AfterBoot.Load() >= 0 || s.Igpu < 0) return false;
+                    before = s.Igpu;
+                    return s.Igpu == igpu || Gpu.SetIgpu(igpu);
+                });
+            }
+            catch { ok = false; }
+            finally { _busy = false; RunPendingPower(); await RefreshGpuAsync(); }
+            if (ok && igpu == 1 && before != 1) _ = Task.Run(() => NudgeDgpuEject());   // let the firmware detach it once idle
+            else if (ok && igpu != 1 && before == 1) _ = Task.Run(() => ReconcileDgpu(5000));
+            return ok;
         }
 
         void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -247,6 +459,8 @@ namespace TBMini
                 try { msg = await Task.Run(ApplyAfterBoot); }
                 finally { _busy = false; }
                 ScheduleAuto(1500);                          // after the boot work, so the first auto check is not lost to _busy
+                ScheduleUsbc(6000, plugged: false);          // undo a GPU override a previous run left behind if its reason is gone
+                _ = Task.Run(() => WinPowerMode.Unify());    // one Windows power mode for both sources from the start
                 if (msg != null) Balloon(msg);
                 _ = Task.Run(() => ReconcileDgpu(10000));
                 _ = Task.Run(RefreshInstalledCopy);
@@ -259,7 +473,12 @@ namespace TBMini
 
         void OnDisplayChanged(object sender, EventArgs e)
         {
-            if (!_test) _ui.Post(_ => RestartColorDebounce(), null);
+            if (_test) return;
+            _ui.Post(_ =>
+            {
+                RestartColorDebounce();
+                if (_usbcLidSkipped) { _usbcLidSkipped = false; ScheduleUsbc(3000, plugged: false); }   // the internal panel may be back
+            }, null);
         }
 
         // ------------------------------------------------------------------ feature rows
@@ -362,9 +581,17 @@ namespace TBMini
         /// Keep the firmware informed about dGPU presence (Lenovo's add-in / LLT do this on start, resume, AC change).
         static void ReconcileDgpu(int delayMs)
         {
-            if (Interlocked.Exchange(ref _reconciling, 1) == 1) return;    // one at a time
-            try { Thread.Sleep(delayMs); ReconcileCore(); }
-            finally { Interlocked.Exchange(ref _reconciling, 0); }
+            // one runner at a time; a request made while it runs makes it run once more (none is lost)
+            Interlocked.Exchange(ref _reconcileAgain, 1);
+            while (Interlocked.CompareExchange(ref _reconciling, 1, 0) == 0)
+            {
+                try
+                {
+                    while (Interlocked.Exchange(ref _reconcileAgain, 0) == 1) { Thread.Sleep(delayMs); ReconcileCore(); }
+                }
+                finally { Interlocked.Exchange(ref _reconciling, 0); }
+                if (Volatile.Read(ref _reconcileAgain) == 0) break;          // nobody asked while it was finishing
+            }
         }
 
         static void ReconcileCore()
@@ -451,6 +678,7 @@ namespace TBMini
 
         void RunPendingPower()
         {
+            RunPendingUsbc();
             if (_pendingPower is PowerMode p && !_busy)
             {
                 _pendingPower = null;
@@ -488,6 +716,7 @@ namespace TBMini
                         AfterBoot.Clear();
                         return wantIgpu < 0 || s.Igpu == wantIgpu || Gpu.SetIgpu(wantIgpu);
                     });
+                    if (ok) { GpuAuto.Save(GpuAuto.St.None); CancelUsbc(); }   // the user picked the GPU: nothing for auto adjust to undo
                     if (!ok && wantIgpu == 1)
                         Balloon(T("集显模式没有生效：独显正被程序占用。关闭用独显的程序后再试。", "iGPU only did not take effect: an app is using the dGPU. Close it and try again."));
                     else if (!ok)
@@ -532,6 +761,7 @@ namespace TBMini
                         if (Gpu.Family(s.Staged) != wantBios) Gpu.SetBios(wantBios);
                         if (wantIgpu >= 0) AfterBoot.Save(wantIgpu); else AfterBoot.Clear();
                     });
+                    GpuAuto.Save(GpuAuto.St.None); CancelUsbc(); // the user picked the GPU (applies after the restart)
                     if (choice == DialogResult.Yes) Reboot();
                     else Balloon(T($"已写入，下次重启后切到「{Gpu.Name(target)}」", $"Saved. Switches to {Gpu.Name(target)} at the next restart"));
                 }
@@ -808,6 +1038,7 @@ namespace TBMini
         }
 
         void Balloon(string text) => _icon.ShowBalloonTip(5000, "TBMini", text, ToolTipIcon.Info);
+        void Balloon(string text, ToolTipIcon icon) => _icon.ShowBalloonTip(8000, "TBMini", text, icon);
 
         void Error(string title, Exception e)
         {
@@ -825,6 +1056,8 @@ namespace TBMini
             SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
             SystemEvents.SessionSwitch -= OnSessionSwitch;
             _autoTimer.Dispose();
+            _usbcTimer.Dispose();
+            _unifyTimer.Dispose();
             _powerWatch?.Dispose();
             _guardTimer.Stop();
             _devDebounce.Stop();

@@ -146,6 +146,8 @@ namespace TBMini
                     case "--status":
                         sb.AppendLine("power=" + Its.Name(Its.Read()) + "  (its_supported=" + Its.Supported + ")");
                         sb.AppendLine("ac=" + Its.OnAC + "  charger=" + Charger.Current + "  adapter_type=" + Charger.AdapterType() + "  geek_supported=" + Its.GeekSupported + "  geek_greyed=" + Its.GeekGreyed + "  geek_available=" + Its.GeekAvailable);
+                        sb.AppendLine("windows_power_mode " + WinPowerMode.Describe());
+                        sb.AppendLine("usbc_class=" + Charger.ClassifyPd() + "  cpu_pl1=" + (OtherMethod.Get(OtherMethod.CpuPl1)?.ToString() ?? "n/a") + "  cpu_pl2=" + (OtherMethod.Get(OtherMethod.CpuPl2)?.ToString() ?? "n/a"));
                         sb.AppendLine("auto_adjust=" + (Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", 0) is int ap && ap == 1)
                                       + "  charger_events=" + Charger.Subscribe(() => { }));
                         sb.AppendLine("panel_on_dgpu=" + (Gpu.InternalPanelOnDgpu()?.ToString() ?? "unknown"));

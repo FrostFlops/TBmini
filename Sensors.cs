@@ -430,8 +430,35 @@ namespace TBMini
         }
 
         // ------------------------------------------------------------------ NVIDIA NVML (System32\nvml.dll from the driver)
+        /// The dGPU's enforced power limit in W, only if it is already awake (D0; never wakes it), else null. On USB-C power
+        /// this is the EC's cap: about 15 W on 65 W or less, about 30 W on 100 W. Its own NVML init/shutdown pair (NVML
+        /// reference-counts them), so it does not disturb the panel's sensor reads.
+        public static int? DgpuPowerLimitW()
+        {
+            try { if (DGpu.State() != GpuPower.Active) return null; } catch { return null; }
+            return Nvml.EnforcedLimitW();
+        }
+
         static class Nvml
         {
+            [DllImport("nvml.dll")] static extern int nvmlDeviceGetEnforcedPowerLimit(IntPtr dev, out uint mw);
+
+            public static int? EnforcedLimitW()
+            {
+                try
+                {
+                    if (nvmlInit_v2() != 0) return null;
+                    try
+                    {
+                        if (nvmlDeviceGetHandleByIndex_v2(0, out IntPtr dev) != 0) return null;
+                        if (nvmlDeviceGetEnforcedPowerLimit(dev, out uint mw) != 0 || mw == 0 || mw > 400000) return null;
+                        return (int)((mw + 500) / 1000);
+                    }
+                    finally { nvmlShutdown(); }
+                }
+                catch { return null; }
+            }
+
             [DllImport("nvml.dll")] static extern int nvmlInit_v2();
             [DllImport("nvml.dll")] static extern int nvmlShutdown();
             [DllImport("nvml.dll")] static extern int nvmlDeviceGetHandleByIndex_v2(uint i, out IntPtr dev);
