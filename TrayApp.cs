@@ -300,9 +300,10 @@ namespace TBMini
         internal async void SetFeature(Feature f, int value)
         {
             var st = FeatureStateOf(f);
-            if (st.Busy) return;
+            // the control already moved to the new value on click: re-sync it whenever nothing is written
+            if (st.Busy) { _panel.UpdateView(); return; }
             string confirm = value >= 0 ? f.Confirm(value) : null;
-            if (confirm != null && !Ask(confirm)) return;
+            if (confirm != null && !Ask(confirm)) { _panel.UpdateView(); return; }
             st.Busy = true; _panel.UpdateView();
             bool wasZh = Zh;
             try
@@ -420,27 +421,32 @@ namespace TBMini
 
         // ------------------------------------------------------------------ actions
         internal PowerMode Power => _power;
+        /// What the panel shows: a mode being switched to (or queued) right away, otherwise the current one.
+        internal PowerMode ShownPower => _pendingPower ?? _switchTo ?? _power;
         internal bool OnAc => _ac;
         internal GpuSnapshot GpuInfo => _gpu;
         internal bool Busy => _busy;
 
         PowerMode? _pendingPower;      // a user choice made while another switch was running
+        PowerMode? _switchTo;          // the mode a running switch is heading to
 
         /// A mode picked by the user (panel, tray menu): this also turns auto adjust off.
         internal void SetPower(PowerMode m)
         {
-            if (_autoPower) SetAutoPower(false);
-            if (_busy) { _pendingPower = m; return; }      // applied when the running switch finishes
-            SetPowerCore(m);
+            if (_busy) _pendingPower = m;                  // applied when the running switch finishes
+            else _switchTo = m;                            // set first, so the panel moves to it right away
+            if (_autoPower) SetAutoPower(false); else if (_busy) _panel.UpdateView();
+            if (!_busy) SetPowerCore(m);
         }
 
         async void SetPowerCore(PowerMode m, bool quiet = false)
         {
-            if (_busy || m == _power) { _panel.UpdateView(); return; }
-            _busy = true; _panel.UpdateView();
+            if (_busy) { _panel.UpdateView(); return; }
+            if (m == _power) { _switchTo = null; _panel.UpdateView(); return; }
+            _switchTo = m; _busy = true; _panel.UpdateView();
             try { await Task.Run(() => Its.Set(m)); }
             catch (Exception e) { if (!quiet) Error(T("切换性能模式失败", "Could not switch the performance mode"), e); }
-            finally { _busy = false; PollPower(force: true); RunPendingPower(); }
+            finally { _busy = false; _switchTo = null; PollPower(force: true); RunPendingPower(); }
         }
 
         void RunPendingPower()

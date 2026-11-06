@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -117,12 +118,60 @@ namespace TBMini
         public static Color Mix(Color a, Color b, float t) =>
             Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
 
+        /// Like Mix, but alpha blends too (glass colours are translucent); t is clamped to 0..1.
+        public static Color MixA(Color a, Color b, float t)
+        {
+            t = Math.Max(0f, Math.Min(1f, t));
+            return Color.FromArgb((int)Math.Round(a.A + (b.A - a.A) * t), (int)Math.Round(a.R + (b.R - a.R) * t),
+                                  (int)Math.Round(a.G + (b.G - a.G) * t), (int)Math.Round(a.B + (b.B - a.B) * t));
+        }
+
+        public static Color Fade(Color c, float k) => Color.FromArgb((int)Math.Round(c.A * Math.Max(0f, Math.Min(1f, k))), c);
+
+        /// Blend a -> b round the colour wheel (shortest way; saturation and brightness blend linearly), so the colours
+        /// in between stay vivid: green -> orange passes yellow instead of olive. A grey end takes the other's hue.
+        public static Color HueMix(Color a, Color b, float t)
+        {
+            t = Math.Max(0f, Math.Min(1f, t));
+            if (t <= 0f) return a;
+            if (t >= 1f) return b;
+            ToHsv(a, out float ha, out float sa, out float va);
+            ToHsv(b, out float hb, out float sb, out float vb);
+            if (sa < 0.05f) ha = hb; else if (sb < 0.05f) hb = ha;
+            float dh = hb - ha;
+            if (dh > 180f) dh -= 360f; else if (dh < -180f) dh += 360f;
+            float hh = ha + dh * t; if (hh < 0) hh += 360f; else if (hh >= 360f) hh -= 360f;
+            return FromHsv(hh, sa + (sb - sa) * t, va + (vb - va) * t, (int)Math.Round(a.A + (b.A - a.A) * t));
+        }
+
+        static void ToHsv(Color c, out float h, out float s, out float v)
+        {
+            float r = c.R / 255f, g = c.G / 255f, b = c.B / 255f;
+            float max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b)), d = max - min;
+            v = max; s = max <= 0 ? 0 : d / max; h = 0;
+            if (d > 0)
+            {
+                h = max == r ? (g - b) / d + (g < b ? 6 : 0) : max == g ? (b - r) / d + 2 : (r - g) / d + 4;
+                h *= 60;
+            }
+        }
+
+        static Color FromHsv(float h, float s, float v, int alpha)
+        {
+            float cc = v * s, x = cc * (1 - Math.Abs(h / 60 % 2 - 1)), m = v - cc;
+            float r, g, b;
+            if (h < 60) { r = cc; g = x; b = 0; } else if (h < 120) { r = x; g = cc; b = 0; } else if (h < 180) { r = 0; g = cc; b = x; }
+            else if (h < 240) { r = 0; g = x; b = cc; } else if (h < 300) { r = x; g = 0; b = cc; } else { r = cc; g = 0; b = x; }
+            int R(float u) => Math.Max(0, Math.Min(255, (int)Math.Round((u + m) * 255)));
+            return Color.FromArgb(Math.Max(0, Math.Min(255, alpha)), R(r), R(g), R(b));
+        }
+
         /// Surface edge: on glass a gradient from Hi (top) to HiLow (bottom), like light on the rim; otherwise a plain border.
-        public static void Edge(Graphics g, RectangleF r, float radius, Theme t, float ui)
+        public static void Edge(Graphics g, RectangleF r, float radius, Theme t, float ui, float k = 1f)
         {
             using var p = Draw.RoundRect(r, radius);
-            if (!t.Glass) { using var pen0 = new Pen(t.CardBorder); g.DrawPath(pen0, p); return; }
-            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), t.Hi, t.HiLow, 90f);
+            if (!t.Glass) { using var pen0 = new Pen(Fade(t.CardBorder, k)); g.DrawPath(pen0, p); return; }
+            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), Fade(t.Hi, k), Fade(t.HiLow, k), 90f);
             using var pen = new Pen(b, Math.Max(1f, ui * 0.9f));
             g.DrawPath(pen, p);
         }
@@ -292,8 +341,17 @@ namespace TBMini
             _tip.SetToolTip(_pt[1], T("智能：按负载自动调节", "Smart: adjusts to the load"));
             _tip.SetToolTip(_pt[2], T("性能：高功耗释放", "Performance: higher power limits"));
             _autoTile.Text = T("自动调节", "Auto adjust");
-            _tip.SetToolTip(_autoTile, T("自动调节：用电池或充电器功率不足（插着电电池仍在放电，如 45W）时「省电」，接 USB-C 充电器（如 65/100W PD）时「性能」，接原装大功率适配器时「极客」。功率不足的判断会保持到拔掉充电器为止（重负载下 65/100W 也可能触发）。只在电源变化或 Windows 报告供电不足时切换，不在后台轮询；手动选择模式会关闭它",
-                                         "Auto adjust: Saver on battery or on a charger that can't keep up (the battery drains while plugged in, e.g. 45 W), Performance on a USB-C charger (e.g. 65/100 W PD), Geek on the full-power adapter. A charger that couldn't keep up stays in Saver until you unplug it (a 65/100 W one can hit this under heavy load). Switches only when the power source changes or Windows reports the charger can't keep up (no background polling); picking a mode yourself turns it off"));
+            // short lines: a tooltip shows each one as it is, so keep it a glanceable mapping
+            _tip.SetToolTip(_autoTile, T("自动调节\n"
+                                         + "电池 / 充电器功率不足 → 省电\n"
+                                         + "USB-C 充电器 → 性能\n"
+                                         + "原装适配器 → 极客\n"
+                                         + "只在电源变化时切换，手动选模式会关闭它",
+                                         "Auto adjust\n"
+                                         + "Battery / charger can't keep up → Saver\n"
+                                         + "USB-C charger → Performance\n"
+                                         + "Full-power adapter → Geek\n"
+                                         + "Switches only when power changes; picking a mode turns it off"));
             _tip.SetToolTip(_gt[0], T("混合：内屏走核显，独显按需工作（切入/切出独显直连要重启）",
                                       "Hybrid: the display runs on the iGPU and the dGPU works on demand (switching to or from dGPU direct needs a restart)"));
             _tip.SetToolTip(_gt[1], T("集显：混合模式下关掉独显，不用重启；独显被占用时不会生效",
@@ -530,7 +588,7 @@ namespace TBMini
             if (f.Kind == FeatureKind.Toggle)
             {
                 var t = new Toggle { Ui = _s };
-                t.Click += (s, e) => _app.SetFeature(f, -2);
+                t.Click += (s, e) => { t.Unknown = false; t.On = !t.On; _app.SetFeature(f, -2); };   // flip now, re-synced after the write
                 r.Ctl = t;
             }
             else if (f.Options.Length <= 4)
@@ -692,7 +750,9 @@ namespace TBMini
                 Size cs = r.Ctl is Toggle ? new Size(S(40), S(20)) : new Size(S(200), S(28));
                 if (r.Ctl is Segmented sg && sg.Options.Length <= 2) cs.Width = S(150);
                 r.Ctl.Bounds = new Rectangle(colW - inX - cs.Width, ry + (rh - cs.Height) / 2, cs.Width, cs.Height);
-                r.Label.Bounds = new Rectangle(inX, ry + 1, r.Ctl.Left - inX - S(8), rh - 2);   // keep dividers visible
+                // only as tall as the text, centred: a full-height label would paint over the card's rim and the dividers
+                int lh = Math.Min(rh - S(8), _row.Height + S(6));
+                r.Label.Bounds = new Rectangle(inX, ry + (rh - lh) / 2, r.Ctl.Left - inX - S(8), lh);
             }
             b.Card.Dividers = dividers.ToArray();
             b.Card.Invalidate();
@@ -781,24 +841,26 @@ namespace TBMini
             if (InvokeRequired) { BeginInvoke(new Action(UpdateView)); return; }
 
             bool busy = _app.Busy;
-            var power = _app.Power;
+            var power = _app.ShownPower;                              // a mode being switched to shows right away
             bool geekOk = Its.GeekAvailable, auto = _app.AutoPower;
+            // while a switch runs the tiles stay as they are (Locked ignores clicks) instead of greying out mid-transition
+            Tile.SelectIn(_pt, auto ? -1 : Array.IndexOf(PowerModes, power));
             for (int i = 0; i < 4; i++)
             {
-                _pt[i].Selected = power == PowerModes[i] && !auto;
                 _pt[i].Ring = power == PowerModes[i] && auto;          // the mode auto adjust is applying right now
-                _pt[i].Enabled = !busy && (PowerModes[i] != PowerMode.Geek || geekOk);
+                _pt[i].Enabled = PowerModes[i] != PowerMode.Geek || geekOk;
+                _pt[i].Locked = busy;
                 _pt[i].Invalidate();
             }
-            _autoTile.Selected = auto; _autoTile.Enabled = !busy && Its.Supported; _autoTile.Invalidate();
+            _autoTile.Selected = auto; _autoTile.Enabled = Its.Supported; _autoTile.Locked = busy; _autoTile.Invalidate();
             string geekTip = geekOk ? T("极客：最高功耗（需原装大功率适配器）", "Geek: maximum power (needs the full-power adapter)") : Its.GeekUnavailableText();
             if (geekTip != _geekTip) { _geekTip = geekTip; _tip.SetToolTip(_pt[3], geekTip); }
 
             var gi = _app.GpuInfo;
+            Tile.SelectIn(_gt, Array.IndexOf(GpuModes, gi.Mode));
             for (int i = 0; i < 3; i++)
             {
-                _gt[i].Selected = gi.Mode == GpuModes[i];
-                _gt[i].Enabled = !busy;
+                _gt[i].Locked = busy;
                 _gt[i].Invalidate();
             }
 
@@ -823,12 +885,13 @@ namespace TBMini
                 if (f.Kind == FeatureKind.Choice && (wantSeg != (r.Ctl is Segmented) || (r.Ctl is Segmented sg0 && !sg0.Options.SequenceEqual(f.Options))))
                 { BuildControl(r); ApplyTheme(); layout = true; }
 
-                bool usable = !st.Busy;
+                // while a write runs, keep showing the value the user just picked (the control moved there on click)
+                bool busyRow = st.Busy;
                 switch (r.Ctl)
                 {
-                    case Toggle t: t.On = st.Value == 1; t.Unknown = st.Value < 0; t.Enabled = usable; break;
-                    case Segmented sg: sg.Selected = st.Value; sg.Enabled = usable; break;
-                    case Drop d: d.Text = st.Value >= 0 && st.Value < f.Options.Length ? f.Options[st.Value] : "—"; d.Enabled = usable; break;
+                    case Toggle t: if (!busyRow) { t.On = st.Value == 1; t.Unknown = st.Value < 0; } t.Locked = busyRow; break;
+                    case Segmented sg: if (!busyRow) sg.Selected = st.Value; sg.Locked = busyRow; break;
+                    case Drop d: if (!busyRow) d.Text = st.Value >= 0 && st.Value < f.Options.Length ? f.Options[st.Value] : "—"; d.Locked = busyRow; break;
                 }
                 r.Ctl.Invalidate();
             }
@@ -944,6 +1007,20 @@ namespace TBMini
         public float Ui = 1f;
         protected bool Hover;
         MouseButtons _down;
+        bool _locked;
+
+        /// Busy (a switch is running): looks normal but ignores clicks, so a transition is not interrupted by greying out.
+        public bool Locked
+        {
+            get => _locked;
+            set { if (_locked == value) return; _locked = value; Cursor = value ? Cursors.AppStarting : Cursors.Hand; Invalidate(); }
+        }
+
+        /// Hover highlight only when the control can actually be used.
+        protected bool Hovered => Hover && Enabled && !_locked;
+        protected static float Clamp01(float v) => v < 0 ? 0 : v > 1 ? 1 : v;
+        /// Animate only what the user can see; otherwise jump straight to the end state.
+        protected bool CanAnimate => IsHandleCreated && Visible && Animator.Enabled;
 
         protected Owner()
         {
@@ -957,7 +1034,7 @@ namespace TBMini
         protected override void OnMouseLeave(EventArgs e) { Hover = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
         protected override void OnMouseDown(MouseEventArgs e) { _down = e.Button; base.OnMouseDown(e); }
-        protected override void OnClick(EventArgs e) { if (_down == MouseButtons.Left) base.OnClick(e); }
+        protected override void OnClick(EventArgs e) { if (_down == MouseButtons.Left && !_locked) base.OnClick(e); }
         protected override void OnPaintBackground(PaintEventArgs e) { }
 
         protected Graphics Prep(PaintEventArgs e)
@@ -985,12 +1062,12 @@ namespace TBMini
         /// Glass edge: bright where light hits the top, fading downwards (a plain border on the opaque theme).
         protected void Edge(Graphics g, RectangleF r, float radius) => Theme.Edge(g, r, radius, T, Ui);
 
-        /// Glossy sheen on a coloured (selected) surface.
-        protected void Sheen(Graphics g, RectangleF r, float radius)
+        /// Glossy sheen on a coloured (selected) surface; k fades it (0..1) while a transition is under way.
+        protected void Sheen(Graphics g, RectangleF r, float radius, float k = 1f)
         {
-            if (!T.Glass) return;
+            if (!T.Glass || k <= 0 || r.Height < 2) return;
             using var p = Draw.RoundRect(r, radius);
-            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height / 2 + 2), Color.FromArgb(70, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f);
+            using var b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height / 2 + 2), Color.FromArgb((int)(70 * Clamp01(k)), 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f);
             using var clip = g.Clip;
             g.SetClip(new RectangleF(r.X, r.Y, r.Width, r.Height / 2), CombineMode.Intersect);
             g.FillPath(b, p);
@@ -1035,42 +1112,305 @@ namespace TBMini
         }
     }
 
-    sealed class Tile : Owner
+    sealed class Tile : Owner, IAnimated
     {
         public string Glyph;
         public Color Accent = Color.SteelBlue;
-        public bool Selected;
         public bool Ring;                              // outlined in its colour: the mode auto adjust is applying
+        bool _sel;
+        // selection: the accent floods in from where the tile was pressed (or its centre) and drains back out
+        Spring _fill = new Spring(122f, 0.66f, 0.002f);   // ~0.6 s; speed scales with sqrt(K)
+        // press: the tile squishes in and springs back with a little wobble
+        Spring _press = new Spring(700f, 0.9f, 0.0005f);
+        PointF _origin, _pressPt;
+        int? _pressedAt;              // when this tile was last pressed (TickCount); null: never
+
+        public Tile() { _press.Snap(1f); }
+
+        /// Selects index sel (-1: none) in a group of tiles. The colour leaves the old tile through the side that faces
+        /// the new one and enters the new tile from the side that faces the old one, so it reads as one liquid moving across.
+        public static void SelectIn(Tile[] group, int sel)
+        {
+            int old = Array.FindIndex(group, t => t._sel);
+            if (old == sel) return;
+            if (old >= 0 && sel >= 0)
+            {
+                var a = group[old]; var b = group[sel];
+                a._flowTo = b.Center(a.Parent); b._flowFrom = a.Center(b.Parent);
+                a._mixNext = b.Accent;   // the colour leaving the old tile turns into the new one on its way out
+            }
+            for (int i = 0; i < group.Length; i++) group[i].Selected = i == sel;
+        }
+
+        PointF? _flowFrom, _flowTo;   // the other tile's centre (parent coordinates) for the next select / deselect
+        Color? _mixNext, _mix;        // the other tile's colour for the next / the running transfer
+
+        /// The selected colour as a soft top-to-bottom gradient (lighter above, deeper below) instead of a flat block.
+        Color ShadeTop(Color accent) => Theme.Mix(accent, Color.White, T.Dark ? 0.16f : 0.20f);
+        static Color ShadeBottom(Color accent) => Theme.Mix(accent, Color.Black, 0.10f);
+
+        LinearGradientBrush Shade(Color accent) =>
+            new LinearGradientBrush(new RectangleF(0, -1, Math.Max(1, Width), Math.Max(1, Height) + 2), ShadeTop(accent), ShadeBottom(accent), 90f);
+
+        int[] _px = new int[0];
+
+        /// The flood for one frame: Shade's gradient (plus the glass sheen, faded in with q) inside a circle around _origin
+        /// whose outer `feather` pixels ramp from opaque to clear. Premultiplied ARGB, written directly (~0.3 ms per tile).
+        /// The draining tile's liquid (the tail of the stream) also turns into the new tile's colour along the flow:
+        /// a linear gradient across the tile, the new colour at the side it leaves through and the old colour at the far
+        /// side, growing with m = 1 - q as it drains. The mix goes round the colour wheel (green -> yellow -> orange),
+        /// not straight through RGB, which would turn muddy in the middle.
+        Bitmap FloodBitmap(Color accent, Color? other, float m, float outer, float feather, float q)
+        {
+            int w = Math.Max(1, Width), h = Math.Max(1, Height);
+            var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+            try
+            {
+                int stride = data.Stride / 4, n = stride * h;
+                if (_px.Length < n) _px = new int[n];
+                float ox = _origin.X, oy = _origin.Y;
+                // flow axis: from the tile's centre out through _origin (the side facing the new tile)
+                float ux = ox - w / 2f, uy = oy - h / 2f, ul = (float)Math.Sqrt(ux * ux + uy * uy);
+                bool mix = other.HasValue && m > 0.002f && ul > 0.5f;
+                float span = 1f;
+                if (mix) { ux /= ul; uy /= ul; span = Math.Max(1f, Math.Abs(ux) * w + Math.Abs(uy) * h); }
+                const int L = 256;                                  // accent -> other, LUT[0] = accent (fine enough: no bands)
+                if (_lut.Length != L + 1) _lut = new Color[L + 1];
+                for (int i = 0; i <= L; i++) _lut[i] = mix ? Theme.HueMix(accent, other.Value, (float)i / L) : accent;
+                // Shade + sheen are linear in the colour: row colour = c * P(y) + Q(y) per channel
+                float lift = T.Dark ? 0.16f : 0.20f, deepen = 0.10f;
+                float sheenTop = T.Glass ? 70f / 255f * q : 0f, half = h / 2f;
+                float inner = outer - feather, inv = 1f / Math.Max(0.5f, feather);
+                float outer2 = outer * outer, inner2 = inner > 0 ? inner * inner : -1f, invSpan = 1f / span;
+                Color c0 = _lut[0];
+                for (int y = 0; y < h; y++)
+                {
+                    float t = (y + 0.5f) / h;
+                    float sh = y < half ? sheenTop * (1f - y / half) : 0f;          // white sheen over the top half (glass)
+                    float p = ((1 - lift) * (1 - t) + (1 - deepen) * t) * (1 - sh);
+                    float qq = 255f * lift * (1 - t) * (1 - sh) + 255f * sh;
+                    int solid = (255 << 24) | ((int)(c0.R * p + qq) << 16) | ((int)(c0.G * p + qq) << 8) | (int)(c0.B * p + qq);
+                    float dy = y + 0.5f - oy, dy2 = dy * dy;
+                    int row = y * stride;
+                    for (int x = 0; x < w; x++)
+                    {
+                        float dx = x + 0.5f - ox, d2 = dx * dx + dy2;
+                        if (d2 >= outer2) { _px[row + x] = 0; continue; }
+                        Color c = c0;
+                        if (mix)
+                        {
+                            // distance behind the exit side, measured along the flow: 0 there, span at the far side
+                            float behind = -(dx * ux + dy * uy);
+                            float k = m * (1f - Math.Max(0f, behind) * invSpan);
+                            if (k > 0f) c = _lut[Math.Min(L, (int)(k * L + 0.5f))];
+                        }
+                        float a = d2 <= inner2 ? 1f : Math.Min(1f, (outer - (float)Math.Sqrt(d2)) * inv);
+                        if (a >= 1f && !mix) { _px[row + x] = solid; continue; }
+                        float cr = c.R * p + qq, cg = c.G * p + qq, cb = c.B * p + qq;
+                        int A = (int)(a * 255f + 0.5f);
+                        _px[row + x] = (A << 24) | ((int)(cr * a) << 16) | ((int)(cg * a) << 8) | (int)(cb * a);
+                    }
+                }
+                Marshal.Copy(_px, 0, data.Scan0, n);
+            }
+            finally { bmp.UnlockBits(data); }
+            return bmp;
+        }
+
+        Color[] _lut = new Color[0];
+
+        PointF Center(Control space)
+        {
+            var p = space == Parent ? Location : (space != null ? space.PointToClient(Parent.PointToScreen(Location)) : Location);
+            return new PointF(p.X + Width / 2f, p.Y + Height / 2f);
+        }
+
+        /// Where the line from this tile's centre towards other (parent coordinates) leaves the tile, in local coordinates.
+        PointF EdgeToward(PointF other)
+        {
+            float dx = other.X - (Left + Width / 2f), dy = other.Y - (Top + Height / 2f);
+            if (Math.Abs(dx) < 0.5f && Math.Abs(dy) < 0.5f) return new PointF(Width / 2f, Height / 2f);
+            float s = Math.Min(Math.Abs(dx) > 0.01f ? Width / 2f / Math.Abs(dx) : float.MaxValue, Math.Abs(dy) > 0.01f ? Height / 2f / Math.Abs(dy) : float.MaxValue);
+            return new PointF(Width / 2f + dx * s, Height / 2f + dy * s);
+        }
+
+        public bool Selected
+        {
+            get => _sel;
+            set
+            {
+                if (_sel == value) return;
+                _sel = value;
+                float to = value ? 1f : 0f;
+                var hint = value ? _flowFrom : _flowTo;
+                _mix = hint != null ? _mixNext : null;
+                _flowFrom = _flowTo = null; _mixNext = null;
+                if (!CanAnimate) { _fill.Snap(to); Invalidate(); return; }
+                // origin: towards the other tile of a transfer; else where it was just pressed; else the centre
+                if (hint is PointF h) _origin = EdgeToward(h);
+                else if (value && _pressedAt is int at && unchecked(Environment.TickCount - at) <= 3000) _origin = _pressPt;
+                else _origin = new PointF(Width / 2f, Height / 2f);
+                _fill.Target = to;
+                Animator.Run(this);
+            }
+        }
+
+        public bool Tick(float dt)
+        {
+            if (IsDisposed) return false;
+            bool a = _fill.Step(dt), b = _press.Step(dt);
+            Invalidate();
+            return a || b;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || !Enabled || Locked) return;
+            _pressPt = e.Location; _pressedAt = Environment.TickCount;   // a running flood keeps its origin
+            if (!CanAnimate) return;
+            _press.K = 900f; _press.Zeta = 0.9f; _press.Target = 0.93f;
+            Animator.Run(this);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); Release(); }
+        protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); Release(); }
+        protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); if (!Visible) _press.Snap(1f); }
+
+        void Release()
+        {
+            if (_press.Target == 1f) return;
+            _press.K = 380f; _press.Zeta = 0.36f; _press.Target = 1f;   // let go: bounce back
+            if (CanAnimate) Animator.Run(this); else _press.Snap(1f);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = Prep(e);
             Color accent = T.Glass ? Theme.Vivid(Accent, T.Dark) : Accent;   // glass lowers contrast: richer colours
-            Color bg = Selected ? accent : Hover && Enabled ? T.CtlHover : T.Ctl;
-            Color fg = !Enabled && !Selected ? T.Disabled : Selected ? Theme.On(accent) : T.Fg;
+            float f = _fill.X, q = Clamp01(f);
+            float z = Math.Min(1f, _press.X);                                 // overshoot above 1 would leave the tile's bounds
+            if (z < 0.9995f)
+            {
+                g.TranslateTransform(Width / 2f, Height / 2f); g.ScaleTransform(z, z); g.TranslateTransform(-Width / 2f, -Height / 2f);
+            }
             float rad = (T.Glass ? 10 : 6) * Ui;
             var box = new RectangleF(0, 0, Width, Height);
-            Fill(g, box, rad, bg);
-            if (Selected) Sheen(g, box, rad);
-            else if (Ring && Enabled) Stroke(g, new RectangleF(Ui, Ui, Width - 2 * Ui, Height - 2 * Ui), rad - Ui, accent, 2f * Ui);
-            else Edge(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), rad);
-            int gh = S(26);
-            DrawGlyph(g, Glyph, 18, new Rectangle(0, S(9), Width, gh), Selected ? fg : (Enabled ? accent : T.Disabled));
+            Color on = Theme.On(accent);
+            // fully flooded (incl. the spring's overshoot): the anti-aliased gradient fill it has at rest
+            bool full = f >= 0.999f, partial = !full && f > 0.001f;
+            if (full) using (var gb = Shade(accent)) using (var tp = Draw.RoundRect(box, rad)) g.FillPath(gb, tp);
+            else Fill(g, box, rad, Hovered ? T.CtlHover : T.Ctl);
+
+            using var tilePath = Draw.RoundRect(box, rad);
+            using var flood = new GraphicsPath();      // where the content switches to the on-accent colour
+            if (partial)
+            {
+                // the liquid: the tile's gradient inside a circle whose rim is feathered, so its front is soft, not a
+                // hard disc. The opaque core reaches the farthest corner exactly at f = 1, so the hand-over to the
+                // rest fill is seamless.
+                float feather = 20 * Ui;
+                float dx = Math.Max(_origin.X, Width - _origin.X), dy = Math.Max(_origin.Y, Height - _origin.Y);
+                float outer = ((float)Math.Sqrt(dx * dx + dy * dy) + feather) * f + 0.5f;
+                float mid = Math.Max(0.5f, outer - feather / 2);
+                flood.AddEllipse(_origin.X - mid, _origin.Y - mid, 2 * mid, 2 * mid);
+                // computed per pixel into a texture that then fills the rounded tile: an exact radial alpha ramp (no
+                // banding) over the vertical gradient, and smooth tile edges, which a clip region (always aliased) would not give
+                Color? other = !_sel && _mix is Color oc ? (T.Glass ? Theme.Vivid(oc, T.Dark) : oc) : (Color?)null;
+                using var bmp = FloodBitmap(accent, other, 1 - q, outer, feather, q);
+                using var tb = new TextureBrush(bmp, WrapMode.Clamp);
+                g.FillPath(tb, tilePath);
+            }
+            if (full) Sheen(g, box, rad);
+
+            // rim / auto-adjust ring fade out as the colour comes in (no on/off step when the spring overshoots)
+            float rim = 1 - q;
+            if (rim > 0.01f)
+            {
+                if (Ring && Enabled && !_sel) Stroke(g, new RectangleF(Ui, Ui, Width - 2 * Ui, Height - 2 * Ui), rad - Ui, Theme.Fade(accent, rim), 2f * Ui);
+                else Theme.Edge(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), rad, T, Ui, rim);
+            }
+
             // shrink long labels (e.g. English "Performance") to fit instead of cutting them off
             var font = Font;
             int avail = Width - S(8), tw = Gx.Width(Text, font);
             if (tw > avail) font = new Font(Font.FontFamily, Math.Max(7f, Font.Size * avail / tw), Font.Style);
-            DrawText(g, Text, font, new RectangleF(0, S(9) + gh, Width, Height - S(9) - gh - S(4)), fg, StringAlignment.Center, StringAlignment.Near, ellipsis: true);
+            int gh = S(26);
+            var glyphBox = new Rectangle(0, S(9), Width, gh);
+            var textBox = new RectangleF(0, S(9) + gh, Width, Height - S(9) - gh - S(4));
+            Color fgOff = Enabled ? T.Fg : T.Disabled, glyphOff = Enabled ? accent : T.Disabled;
+            // glyph and label in their normal colours outside the liquid and in the on-accent colour inside it:
+            // the colour change travels across the content with the flood (the two never overlap, so no halo)
+            if (!full)
+            {
+                var st = g.Save();
+                if (partial) g.SetClip(flood, CombineMode.Exclude);
+                DrawGlyph(g, Glyph, 18, glyphBox, glyphOff);
+                DrawText(g, Text, font, textBox, fgOff, StringAlignment.Center, StringAlignment.Near, ellipsis: true);
+                g.Restore(st);
+            }
+            if (full || partial)
+            {
+                var st = g.Save();
+                if (partial) g.SetClip(flood, CombineMode.Intersect);
+                DrawGlyph(g, Glyph, 18, glyphBox, on);
+                DrawText(g, Text, font, textBox, on, StringAlignment.Center, StringAlignment.Near, ellipsis: true);
+                g.Restore(st);
+            }
             if (!ReferenceEquals(font, Font)) font.Dispose();
         }
     }
 
-    sealed class Segmented : Owner
+    sealed class Segmented : Owner, IAnimated
     {
         public string[] Options = new string[0];
-        public int Selected = -1;
         public event Action<int> Picked;
-        int _hoverIdx = -1;
+        int _sel = -1, _hoverIdx = -1;
+        // the selection pill's left and right edges, each on its own spring: the edge in front moves first and the
+        // one behind follows, so the pill stretches towards the new option like a drop of liquid and settles there
+        Spring _l = new Spring(300f, 0.75f, 0.05f), _r = new Spring(300f, 0.75f, 0.05f);
+        bool _placed;
+
+        public int Selected
+        {
+            get => _sel;
+            set
+            {
+                if (_sel == value) return;
+                int old = _sel;
+                _sel = value;
+                if (_sel < 0 || _sel >= Options.Length) { _placed = false; Invalidate(); return; }
+                Cell(_sel, out float a, out float b);
+                if (old < 0 || !_placed || !CanAnimate) { _l.Snap(a); _r.Snap(b); _placed = true; Invalidate(); return; }
+                if (_sel > old) { Lead(ref _r); Trail(ref _l); } else { Lead(ref _l); Trail(ref _r); }
+                _l.Target = a; _r.Target = b;
+                Animator.Run(this);
+            }
+        }
+
+        static void Lead(ref Spring s) { s.K = 575f; s.Zeta = 0.58f; }    // quick, overshoots a little
+        static void Trail(ref Spring s) { s.K = 245f; s.Zeta = 0.8f; }    // lags behind, then catches up
+
+        void Cell(int i, out float x0, out float x1)
+        {
+            float w = (float)Width / Math.Max(1, Options.Length), inset = 2.5f * Ui;
+            x0 = i * w + inset; x1 = (i + 1) * w - inset;
+        }
+
+        public bool Tick(float dt)
+        {
+            if (IsDisposed) return false;
+            bool a = _l.Step(dt), b = _r.Step(dt);
+            Invalidate();
+            return a || b;
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (_sel >= 0 && _sel < Options.Length) { Cell(_sel, out float a, out float b); _l.Snap(a); _r.Snap(b); _placed = true; }
+        }
 
         int IndexAt(int x) => Options.Length == 0 ? -1 : Math.Max(0, Math.Min(Options.Length - 1, x * Options.Length / Math.Max(1, Width)));
 
@@ -1086,63 +1426,120 @@ namespace TBMini
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (e.Button == MouseButtons.Left && Enabled && ClientRectangle.Contains(e.Location)) Picked?.Invoke(IndexAt(e.X));
+            if (e.Button != MouseButtons.Left || !Enabled || Locked || !ClientRectangle.Contains(e.Location)) return;
+            int i = IndexAt(e.X);
+            if (i < 0) return;
+            Selected = i;          // move right away; the owner re-syncs from the real state when the write finishes
+            Picked?.Invoke(i);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = Prep(e);
-            float r = Height / 2f;
-            Fill(g, new RectangleF(0, 0, Width, Height), r, T.Track);
-            int n = Math.Max(1, Options.Length);
-            float w = (float)Width / n, inset = 2.5f * Ui;
-            for (int i = 0; i < Options.Length; i++)
+            float rTrack = Height / 2f;
+            Fill(g, new RectangleF(0, 0, Width, Height), rTrack, T.Track);
+            int n = Options.Length;
+            if (n == 0) return;
+            float w = (float)Width / n, inset = 2.5f * Ui, cellH = Height - 2 * inset;
+
+            var fonts = new Font[n];
+            for (int i = 0; i < n; i++)
             {
-                var cell = new RectangleF(i * w + inset, inset, w - 2 * inset, Height - 2 * inset);
-                bool sel = i == Selected;
-                if (sel)
-                {
-                    Fill(g, cell, cell.Height / 2f, Enabled ? T.Accent : T.Disabled);
-                    if (Enabled) Sheen(g, cell, cell.Height / 2f);
-                }
-                else if (i == _hoverIdx && Enabled) Fill(g, cell, cell.Height / 2f, T.CtlHover);
-                Color fg = sel ? Theme.On(T.Accent) : Enabled ? T.Fg : T.Disabled;
                 // shrink a label that does not fit its segment (e.g. English "Dynamic") instead of cutting it off
-                var font = Font;
-                float avail = cell.Width - 4 * Ui, tw = Gx.Width(Options[i], font);
-                if (tw > avail) font = new Font(Font.FontFamily, Math.Max(6.5f, Font.Size * avail / tw), Font.Style);
-                DrawText(g, Options[i], font, cell, fg, StringAlignment.Center, StringAlignment.Center, ellipsis: true);
-                if (!ReferenceEquals(font, Font)) font.Dispose();
+                float avail = w - 2 * inset - 4 * Ui, tw = Gx.Width(Options[i], Font);
+                fonts[i] = tw > avail ? new Font(Font.FontFamily, Math.Max(6.5f, Font.Size * avail / tw), Font.Style) : Font;
             }
+            RectangleF CellRect(int i) => new RectangleF(i * w + inset, inset, w - 2 * inset, cellH);
+
+            bool moving = _l.Moving || _r.Moving;
+            if (_hoverIdx >= 0 && _hoverIdx != _sel && Hovered && !moving) Fill(g, CellRect(_hoverIdx), cellH / 2f, T.CtlHover);
+            Color fg = Enabled ? T.Fg : T.Disabled;
+            for (int i = 0; i < n; i++) DrawText(g, Options[i], fonts[i], CellRect(i), fg, StringAlignment.Center, StringAlignment.Center, ellipsis: true);
+
+            if (_sel >= 0 && _sel < n && _placed)
+            {
+                float x0 = Math.Max(inset * 0.5f, _l.X), x1 = Math.Min(Width - inset * 0.5f, _r.X);
+                float cellW = w - 2 * inset, stretch = Math.Max(0f, (x1 - x0) / cellW - 1f);
+                float h = cellH * (1f - 0.16f * Math.Min(1f, stretch));   // stretched thin, like a moving drop
+                if (x1 - x0 < h) { float c = (x0 + x1) / 2; x0 = c - h / 2; x1 = c + h / 2; }
+                var pill = new RectangleF(x0, (Height - h) / 2f, x1 - x0, h);
+                Color pc = Enabled ? T.Accent : T.Disabled;
+                Fill(g, pill, h / 2f, pc);
+                Sheen(g, pill, h / 2f);
+                // the labels again, in the on-accent colour, clipped to the pill: the colour flows with it
+                using var path = Draw.RoundRect(pill, h / 2f);
+                var saved = g.Save();
+                g.SetClip(path, CombineMode.Intersect);
+                Color on = Theme.On(pc);
+                for (int i = 0; i < n; i++)
+                {
+                    var cr = CellRect(i);
+                    if (cr.Right > pill.Left && cr.Left < pill.Right)
+                        DrawText(g, Options[i], fonts[i], cr, on, StringAlignment.Center, StringAlignment.Center, ellipsis: true);
+                }
+                g.Restore(saved);
+            }
+            foreach (var f in fonts) if (!ReferenceEquals(f, Font)) f.Dispose();
         }
     }
 
-    sealed class Toggle : Owner
+    sealed class Toggle : Owner, IAnimated
     {
-        public bool On, Unknown;
+        bool _on, _unknown, _painted;
+        // 0 = off, 1 = on; underdamped, so the knob arrives with a small squash against the end
+        Spring _p = new Spring(375f, 0.55f, 0.002f);
+
+        public bool On { get => _on; set { if (_on == value) return; _on = value; Retarget(); } }
+        public bool Unknown { get => _unknown; set { if (_unknown == value) return; _unknown = value; Retarget(); } }
+
+        void Retarget()
+        {
+            float to = _on && !_unknown ? 1f : 0f;
+            if (_p.Target == to && !_p.Moving) return;
+            // until the toggle has been on screen once, a new value is where it already is, not a switch: no animation
+            if (!_painted || !CanAnimate) { _p.Snap(to); Invalidate(); return; }
+            _p.Target = to;
+            Animator.Run(this);
+        }
+
+        public bool Tick(float dt)
+        {
+            if (IsDisposed) return false;
+            bool m = _p.Step(dt);
+            Invalidate();
+            return m;
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = Prep(e);
+            _painted = true;
             var r = new RectangleF(1, 1, Width - 2, Height - 2);
-            float knob;
-            if (On && !Unknown)
-            {
-                Color c = Enabled ? (Hover ? Theme.Mix(T.Accent, Color.White, 0.08f) : T.Accent) : T.Disabled;
-                Fill(g, r, r.Height / 2, c);
-                if (Enabled) Sheen(g, r, r.Height / 2);
-                knob = r.Height - 8 * Ui;
-                using var kb = new SolidBrush(Theme.On(c));
-                g.FillEllipse(kb, r.Right - 4 * Ui - knob, r.Y + (r.Height - knob) / 2, knob, knob);
-            }
-            else
-            {
-                Fill(g, r, r.Height / 2, Hover && Enabled ? T.CtlHover : (T.Glass ? T.Track : Color.Transparent));
-                Stroke(g, r, r.Height / 2, Enabled ? T.Sub : T.Disabled, 1.2f * Ui);
-                knob = r.Height - 10 * Ui;
-                using var kb = new SolidBrush(Enabled ? T.Sub : T.Disabled);
-                g.FillEllipse(kb, r.X + 5 * Ui, r.Y + (r.Height - knob) / 2, knob, knob);
-            }
+            float p = _p.X, q = Clamp01(p), rad = r.Height / 2;
+
+            Color accent = Enabled ? (Hovered ? Theme.Mix(T.Accent, Color.White, 0.08f) : T.Accent) : T.Disabled;
+            Color offFill = Hovered ? T.CtlHover : (T.Glass ? T.Track : Color.Transparent);
+            Color offLine = Enabled ? T.Sub : T.Disabled;
+            // the track floods with the accent as the knob travels
+            Fill(g, r, rad, Theme.MixA(offFill.A == 0 ? Color.FromArgb(0, accent) : offFill, accent, q));
+            if (Enabled) Sheen(g, r, rad, q);
+            if (q < 1) Stroke(g, r, rad, Theme.Fade(offLine, 1 - q), 1.2f * Ui);
+
+            // knob: small and grey when off, larger and on-accent coloured when on
+            float dOff = r.Height - 10 * Ui, dOn = r.Height - 8 * Ui, d = dOff + (dOn - dOff) * q;
+            float cOff = r.X + 5 * Ui + dOff / 2, cOn = r.Right - 4 * Ui - dOn / 2;
+            float cx = cOff + (cOn - cOff) * p;
+            // jelly: stretched along the way it moves, in proportion to speed, and a little flatter
+            float speed = Math.Abs(_p.V) * (cOn - cOff) / Math.Max(1f, r.Height);
+            float st = Math.Min(0.55f, speed * 0.045f);
+            float kw = d * (1 + st), kh = d * (1 - st * 0.3f);
+            // past either end (overshoot): squash against the wall instead of leaving the track
+            float lo = r.X + 3 * Ui, hi = r.Right - 3 * Ui;
+            if (cx + kw / 2 > hi) { kw = Math.Max(d * 0.72f, hi - (cx - kw / 2)); kh = d * (1 + (d - kw) / d * 0.35f); cx = hi - kw / 2; }
+            if (cx - kw / 2 < lo) { kw = Math.Max(d * 0.72f, (cx + kw / 2) - lo); kh = d * (1 + (d - kw) / d * 0.35f); cx = lo + kw / 2; }
+            kh = Math.Min(kh, r.Height - 2 * Ui);
+            var knob = new RectangleF(cx - kw / 2, r.Y + (r.Height - kh) / 2, kw, kh);
+            Fill(g, knob, Math.Min(kw, kh) / 2, Theme.MixA(offLine, Theme.On(accent), q));
         }
     }
 
@@ -1153,7 +1550,7 @@ namespace TBMini
             var g = Prep(e);
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             float rad = (T.Glass ? 8 : 5) * Ui;
-            Fill(g, r, rad, Hover && Enabled ? T.CtlHover : T.Ctl);
+            Fill(g, r, rad, Hovered ? T.CtlHover : T.Ctl);
             Edge(g, r, rad);
             DrawText(g, Text, Font, new RectangleF(S(10), 0, Width - S(34), Height), Enabled ? T.Fg : T.Disabled, ellipsis: true);
             DrawGlyph(g, TBMini.Glyph.Chevron, 10, new Rectangle(Width - S(26), 0, S(18), Height), T.Sub);

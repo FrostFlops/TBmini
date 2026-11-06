@@ -99,14 +99,23 @@ namespace TBMini
             if (!t.Glass) { g.Clear(c.Parent is Card ? t.Card : (c.Parent?.BackColor ?? t.Bg)); return; }
             Frost(g, c.ClientRectangle, t);
             if (c.Parent is Card)
+            {
+                var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.None;   // see Frost
                 using (var b = new SolidBrush(t.Card)) g.FillRectangle(b, c.ClientRectangle);
+                g.SmoothingMode = sm;
+            }
         }
 
         /// The window-level glass: transparent, then the frost tint (the same on the form, cards and every child).
+        /// Filled without anti-aliasing: with it, GDI+ covers the first row and column only half, which left a faint
+        /// line along the top and left edge of every control on glass.
         public static void Frost(Graphics g, Rectangle r, Theme t)
         {
             g.Clear(Color.Transparent);
-            if (t.Tint.A > 0) using (var b = new SolidBrush(t.Tint)) g.FillRectangle(b, r);
+            if (t.Tint.A == 0) return;
+            var sm = g.SmoothingMode; g.SmoothingMode = SmoothingMode.None;
+            using (var b = new SolidBrush(t.Tint)) g.FillRectangle(b, r);
+            g.SmoothingMode = sm;
         }
     }
 
