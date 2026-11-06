@@ -27,6 +27,19 @@ namespace TBMini
 
         internal static bool IsAdmin => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
         internal static string ExePath => Process.GetCurrentProcess().MainModule.FileName;
+        internal const string RepoUrl = "https://github.com/FrostFlops/TBmini";
+
+        /// Opens a web page in the user's browser. TBMini usually runs elevated, and a browser started from it would run
+        /// elevated too; handing the URL to Explorer opens it in the normal (unelevated) desktop session instead.
+        internal static void OpenUrl(string url)
+        {
+            try
+            {
+                if (IsAdmin) Process.Start(new ProcessStartInfo("explorer.exe", "\"" + url + "\"") { UseShellExecute = false });
+                else Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch { }
+        }
         internal static string Version
         {
             get

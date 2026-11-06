@@ -150,7 +150,7 @@ namespace TBMini
 
         // ------------------------------------------------------------------ PawnIO (optional driver)
         // PawnIO (https://pawnio.eu) is a signed driver that runs small signed modules. TBMini embeds the official
-        // IntelMSR module, which only allows reading a fixed list of MSRs.
+        // IntelMSR module, which reads a fixed list of MSRs (it can also write a few power-related ones; TBMini only reads).
         // TBMini never installs the driver; without it (or without admin rights) these readings are simply absent.
         static class Pio
         {

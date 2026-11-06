@@ -222,7 +222,7 @@ namespace TBMini
         // switching itself is the GpuAuto state machine (see GpuAuto.cs). dGPU direct can only be told (switching needs a
         // restart); iGPU only needs no notice.
         readonly System.Windows.Forms.Timer _usbcTimer;
-        bool _usbcPlugged, _usbcRunning, _usbcPending, _usbcQuiet, _usbcRetrying, _usbcLidSkipped;
+        bool _usbcPlugged, _usbcRunning, _usbcPending, _usbcQuiet, _usbcRetrying, _usbcLidSkipped, _usbcLidPlugged;
         int _usbcFails, _plugGen;
         int _adapterSeen = -2;        // Lenovo adapter type the last check saw (-2: not known / a plug check is pending)
         int _adapterBefore = -2;      // on resume: the adapter type before sleep (a different one means a swap while asleep)
@@ -303,17 +303,22 @@ namespace TBMini
                 var d = GpuAuto.Decide(ev, chg, mode, st, _autoPower);
                 string switched = null;
                 bool failed = false;
-                if (d.Target is int target && _gpu.PanelOnDgpu == null) _usbcLidSkipped = true;   // panel off (lid closed): mux unverifiable; re-check when it is back
+                if (d.Target is int target && _gpu.PanelOnDgpu == null)
+                {
+                    // panel off (lid closed): the mux state is unverifiable, so wait until the display is back
+                    _usbcLidSkipped = true; _usbcLidPlugged = plugged;
+                }
                 else if (d.Target is int target2)
                 {
                     var r = await SwitchIgpuQuiet(target2);
-                    if (r == null) { _usbcPlugged = plugged; _usbcQuiet = quiet; DeferUsbc(); return; }   // after the running switch
-                    if (r == true) { GpuAuto.Save(d.Next); switched = Gpu.Name(Gpu.SubMode(target2)); }
-                    else
+                    if (r == Switch.Busy) { _usbcPlugged = plugged; _usbcQuiet = quiet; DeferUsbc(); return; }   // after the running switch
+                    if (r == Switch.Ok) { GpuAuto.Save(d.Next); switched = Gpu.Name(Gpu.SubMode(target2)); }
+                    else if (r == Switch.Failed)
                     {
                         if (Stale()) return;                                  // a newer charger event owns the timer now
                         failed = true; _usbcPlugged = plugged; RetryUsbcLater();   // keep the old state; retry quietly
                     }
+                    // Switch.NotNow: a BIOS graphics change waits for a restart (or not Switchable): leave it, quietly
                 }
                 else if (d.Next != st) GpuAuto.Save(d.Next);
                 if (Stale()) return;
@@ -371,32 +376,34 @@ namespace TBMini
             finally { _usbcRunning = false; RunPendingUsbc(); }
         }
 
+        enum Switch { Ok, Failed, Busy, NotNow }
+
         /// Live switch inside Switchable Graphics (0 Hybrid, 1 iGPU only, 2 Auto) for auto adjust: no dialogs, no reboot
-        /// path. null = busy (try again later); false = could not (not admin, not running Switchable, the mux state is only
-        /// inferred because the internal panel is off, a BIOS graphics change waits for a restart, or the read-back did not
-        /// match, e.g. an app holds the dGPU).
-        async Task<bool?> SwitchIgpuQuiet(int igpu)
+        /// path. Busy = another switch runs (try again after it); NotNow = not admin, not running Switchable, the mux state
+        /// is only inferred (internal panel off), or a BIOS graphics change waits for a restart; Failed = the read-back did
+        /// not match (e.g. an app holds the dGPU).
+        async Task<Switch> SwitchIgpuQuiet(int igpu)
         {
-            if (!Program.IsAdmin) return false;
-            if (_busy) return null;
+            if (!Program.IsAdmin) return Switch.NotNow;
+            if (_busy) return Switch.Busy;
             _busy = true; _panel.UpdateView();
-            bool ok = false; int before = -1;
+            var result = Switch.Failed; int before = -1;
             try
             {
-                ok = await Task.Run(() =>
+                result = await Task.Run(() =>
                 {
                     var s = Gpu.Snapshot();
-                    if (!s.RunningKnown || s.PanelOnDgpu != false || s.Running != Gpu.BiosSwitchable) return false;
-                    if (Gpu.Family(s.Staged) != Gpu.BiosSwitchable || s.PendingReboot || AfterBoot.Load() >= 0 || s.Igpu < 0) return false;
+                    if (!s.RunningKnown || s.PanelOnDgpu != false || s.Running != Gpu.BiosSwitchable) return Switch.NotNow;
+                    if (Gpu.Family(s.Staged) != Gpu.BiosSwitchable || s.PendingReboot || AfterBoot.Load() >= 0 || s.Igpu < 0) return Switch.NotNow;
                     before = s.Igpu;
-                    return s.Igpu == igpu || Gpu.SetIgpu(igpu);
+                    return s.Igpu == igpu || Gpu.SetIgpu(igpu) ? Switch.Ok : Switch.Failed;
                 });
             }
-            catch { ok = false; }
+            catch { result = Switch.Failed; }
             finally { _busy = false; RunPendingPower(); await RefreshGpuAsync(); }
-            if (ok && igpu == 1 && before != 1) _ = Task.Run(() => NudgeDgpuEject());   // let the firmware detach it once idle
-            else if (ok && igpu != 1 && before == 1) _ = Task.Run(() => ReconcileDgpu(5000));
-            return ok;
+            if (result == Switch.Ok && igpu == 1 && before != 1) _ = Task.Run(() => NudgeDgpuEject());   // let the firmware detach it once idle
+            else if (result == Switch.Ok && igpu != 1 && before == 1) _ = Task.Run(() => ReconcileDgpu(5000));
+            return result;
         }
 
         void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -477,7 +484,13 @@ namespace TBMini
             _ui.Post(_ =>
             {
                 RestartColorDebounce();
-                if (_usbcLidSkipped) { _usbcLidSkipped = false; ScheduleUsbc(3000, plugged: false); }   // the internal panel may be back
+                if (_usbcLidSkipped)                                          // the internal panel may be back: make the skipped switch
+                {
+                    _usbcLidSkipped = false;
+                    bool connect = _usbcLidPlugged;
+                    ScheduleUsbc(3000, connect);
+                    _usbcQuiet = connect;                                     // its notice was already shown
+                }
             }, null);
         }
 

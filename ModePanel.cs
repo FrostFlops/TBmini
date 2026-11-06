@@ -279,7 +279,8 @@ namespace TBMini
             _value = new Font("Segoe UI Semibold", 9.25f);
             Width = S(2 * ColW + Gap + 2 * Pad);
 
-            _hTitle = new GlassLabel { Font = _title, AutoFit = true, Text = "TBMini" };
+            _hTitle = new GlassLabel { Font = _title, AutoFit = true, Text = "TBMini", Link = true };   // opens the project page
+            _hTitle.Click += (s, e) => { Hide(); Program.OpenUrl(Program.RepoUrl); };
             _chipPower = new Chip { Font = _small, Ui = _s };
             _chipGpu = new Chip { Font = _small, Ui = _s, Glyph = Glyph.Chip };
             Controls.AddRange(new Control[] { _hTitle, _chipPower, _chipGpu });
@@ -342,6 +343,7 @@ namespace TBMini
             _tip.SetToolTip(_pt[2], T("性能：高功耗释放", "Performance: higher power limits"));
             _autoTile.Text = T("自动调节", "Auto adjust");
             // short lines: a tooltip shows each one as it is, so keep it a glanceable mapping
+            _tip.SetToolTip(_hTitle, T("在 GitHub 上打开 TBMini", "Open TBMini on GitHub"));
             _tip.SetToolTip(_autoTile, T("自动调节\n"
                                          + "电池 / 充电器功率不足 → 省电\n"
                                          + "USB-C 充电器 → 性能\n"
