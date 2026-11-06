@@ -26,6 +26,7 @@ namespace TBMini
         public bool Dark;
         public bool Glass;                      // acrylic backdrop + translucent surfaces (Windows 11 22H2+, transparency on)
         public Color Bg, Card, CardBorder, Divider, Fg, Sub, Ctl, CtlHover, Track, Accent, Disabled;
+        public Color AccentFg;                  // accent used for text and icons (fills use Accent)
         public Color Hi, HiLow;                 // surface edge: light catching the top of the glass, fading downwards
         public Color MenuBg, FrameBorder;       // opaque menu background; DWM window border
         public Color Tint = Color.Transparent;  // frost over the acrylic backdrop, keeps text readable on busy backgrounds
@@ -67,24 +68,47 @@ namespace TBMini
             {
                 // translucent surfaces over the acrylic backdrop; the form itself paints nothing (GDI black = see-through)
                 t.Bg = Color.Black;
-                t.Tint = dark ? A(0x1A1A1A, 96) : A(0xF6F6F6, 96);
+                t.Tint = dark ? A(0x161616, 112) : A(0xF6F6F6, 110);
                 if (dark)
                 {
-                    t.Card = A(0xFFFFFF, 20); t.Divider = A(0xFFFFFF, 22); t.Ctl = A(0xFFFFFF, 16); t.CtlHover = A(0xFFFFFF, 38);
-                    t.Track = A(0x000000, 60); t.Sub = A(0xFFFFFF, 160); t.Disabled = A(0xFFFFFF, 80);
-                    t.Hi = A(0xFFFFFF, 80); t.HiLow = A(0xFFFFFF, 14); t.CardBorder = A(0xFFFFFF, 34);
+                    t.Card = A(0xFFFFFF, 24); t.Divider = A(0xFFFFFF, 24); t.Ctl = A(0xFFFFFF, 18); t.CtlHover = A(0xFFFFFF, 40);
+                    t.Track = A(0x000000, 70); t.Sub = A(0xFFFFFF, 196); t.Disabled = A(0xFFFFFF, 92);
+                    t.Hi = A(0xFFFFFF, 90); t.HiLow = A(0xFFFFFF, 16); t.CardBorder = A(0xFFFFFF, 36);
                 }
                 else
                 {
-                    t.Card = A(0xFFFFFF, 140); t.Divider = A(0x000000, 18); t.Ctl = A(0xFFFFFF, 120); t.CtlHover = A(0xFFFFFF, 210);
-                    t.Track = A(0x000000, 16); t.Sub = A(0x000000, 150); t.Disabled = A(0x000000, 72);
-                    t.Hi = A(0xFFFFFF, 245); t.HiLow = A(0xFFFFFF, 90); t.CardBorder = A(0x000000, 20);
+                    t.Card = A(0xFFFFFF, 155); t.Divider = A(0x000000, 20); t.Ctl = A(0xFFFFFF, 130); t.CtlHover = A(0xFFFFFF, 215);
+                    t.Track = A(0x000000, 18); t.Sub = A(0x000000, 178); t.Disabled = A(0x000000, 84);
+                    t.Hi = A(0xFFFFFF, 245); t.HiLow = A(0xFFFFFF, 95); t.CardBorder = A(0x000000, 22);
                 }
             }
             var acc = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\DWM", "AccentColor", null);
             Color a = acc is int abgr ? Color.FromArgb(abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF) : C(0x0F6CBD);
-            t.Accent = dark ? Mix(a, Color.White, 0.25f) : a;
+            t.Accent = t.Glass ? Vivid(a, dark) : dark ? Mix(a, Color.White, 0.25f) : a;
+            t.AccentFg = t.Glass && dark ? Mix(t.Accent, Color.White, 0.3f) : t.Accent;   // accent as text/icon colour: readable on dark glass
             return t;
+        }
+
+        /// Richer version of a colour for glass, where the translucent backdrop lowers contrast: more saturation,
+        /// kept bright on dark glass and slightly deepened on light glass.
+        public static Color Vivid(Color c, bool dark)
+        {
+            float r = c.R / 255f, g = c.G / 255f, b = c.B / 255f;
+            float max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b));
+            float v = max, s = max <= 0 ? 0 : (max - min) / max, h = 0;
+            if (max > min)
+            {
+                float d = max - min;
+                h = max == r ? (g - b) / d + (g < b ? 6 : 0) : max == g ? (b - r) / d + 2 : (r - g) / d + 4;
+                h *= 60;
+            }
+            s = Math.Min(1f, s * 1.25f + 0.08f * Math.Min(1f, s / 0.15f));   // greys stay neutral (no red tint from h = 0)
+            v = dark ? Math.Max(v, 0.88f) : Math.Min(v, 0.90f);
+            float cc = v * s, x = cc * (1 - Math.Abs(h / 60 % 2 - 1)), m = v - cc;
+            float rr, gg, bb;
+            if (h < 60) { rr = cc; gg = x; bb = 0; } else if (h < 120) { rr = x; gg = cc; bb = 0; } else if (h < 180) { rr = 0; gg = cc; bb = x; }
+            else if (h < 240) { rr = 0; gg = x; bb = cc; } else if (h < 300) { rr = x; gg = 0; bb = cc; } else { rr = cc; gg = 0; bb = x; }
+            return Color.FromArgb(c.A, (int)Math.Round((rr + m) * 255), (int)Math.Round((gg + m) * 255), (int)Math.Round((bb + m) * 255));
         }
 
         static Color C(int rgb) => Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
@@ -103,8 +127,13 @@ namespace TBMini
             g.DrawPath(pen, p);
         }
 
-        /// White or near-black text, whichever reads better on c.
-        public static Color On(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) > 160 ? Color.FromArgb(0x1B, 0x1B, 0x1B) : Color.White;
+        /// White or near-black text, whichever has the higher WCAG contrast on c (0.203 = luminance where both are equal).
+        public static Color On(Color c)
+        {
+            static double Lin(int u) { double x = u / 255.0; return x <= 0.03928 ? x / 12.92 : Math.Pow((x + 0.055) / 1.055, 2.4); }
+            double l = 0.2126 * Lin(c.R) + 0.7152 * Lin(c.G) + 0.0722 * Lin(c.B);
+            return l > 0.203 ? Color.FromArgb(0x1B, 0x1B, 0x1B) : Color.White;
+        }
     }
 
     static class Glyph
@@ -114,7 +143,7 @@ namespace TBMini
         public const string Battery = "", Charging = "", Plug = "", Keyboard = "", Palette = "", Speaker = "";
         public const string Chevron = "";
 
-        public const string Game = "\uE7FC", Bolt = "\uE945";
+        public const string Game = "\uE7FC", Bolt = "\uE945", Adapt = "\uE895";   // Adapt = Sync arrows
 
         public static string ForPower(PowerMode m) => m switch
         {
@@ -156,6 +185,8 @@ namespace TBMini
         readonly GlassLabel _secPerf, _secGpu;
         readonly Card _cardPerf, _cardGpu;
         readonly Tile[] _pt = new Tile[4];
+        readonly Tile _autoTile;
+        readonly Tile[] _perfTiles;
         readonly Tile[] _gt = new Tile[3];
         readonly GlassLabel _status;
         readonly GlassLabel _link;
@@ -163,6 +194,7 @@ namespace TBMini
         readonly Dictionary<string, (GlassLabel label, Card card)> _sections = new Dictionary<string, (GlassLabel, Card)>();
 
         bool _menuOpen, _anchorBottom;
+        string _geekTip;
         public int HiddenAt;   // Environment.TickCount when the panel last auto-hid
 
         sealed class Row
@@ -221,6 +253,11 @@ namespace TBMini
                 t.Click += (s, e) => _app.SetPower(m);
                 _pt[i] = t; _cardPerf.Controls.Add(t);
             }
+            // auto adjust: saver on battery, performance on a slow charger, geek on the full-power adapter
+            _autoTile = new Tile { Glyph = Glyph.Adapt, Accent = Color.FromArgb(0x06, 0xB6, 0xD4), Font = _tileText, Ui = _s };
+            _autoTile.Click += (s, e) => _app.SetAutoPower(!_app.AutoPower);
+            _cardPerf.Controls.Add(_autoTile);
+            _perfTiles = _pt.Concat(new[] { _autoTile }).ToArray();
             _secGpu = SectionLabel("");
             _cardGpu = new Card { Ui = _s };
             for (int i = 0; i < 3; i++)
@@ -252,8 +289,11 @@ namespace TBMini
             for (int i = 0; i < 4; i++) _pt[i].Text = Its.Name(PowerModes[i]);
             for (int i = 0; i < 3; i++) _gt[i].Text = Gpu.Name(GpuModes[i]);
             _tip.SetToolTip(_pt[0], T("省电：低功耗、安静", "Saver: low power, quiet"));
-            _tip.SetToolTip(_pt[1], T("智能：按负载自动调节", "Auto: adjusts to the load"));
+            _tip.SetToolTip(_pt[1], T("智能：按负载自动调节", "Smart: adjusts to the load"));
             _tip.SetToolTip(_pt[2], T("性能：高功耗释放", "Performance: higher power limits"));
+            _autoTile.Text = T("自动调节", "Auto adjust");
+            _tip.SetToolTip(_autoTile, T("自动调节：用电池时「省电」，接慢速充电器（如 100W PD）时「性能」，接原装大功率适配器时「极客」。只在插拔电源时切换，不在后台轮询；手动选择模式会关闭它",
+                                         "Auto adjust: Saver on battery, Performance on a slow charger (e.g. 100 W USB-C PD), Geek on the full-power adapter. Switches only when the power source changes (no background polling); picking a mode yourself turns it off"));
             _tip.SetToolTip(_gt[0], T("混合：内屏走核显，独显按需工作（切入/切出独显直连要重启）",
                                       "Hybrid: the display runs on the iGPU and the dGPU works on demand (switching to or from dGPU direct needs a restart)"));
             _tip.SetToolTip(_gt[1], T("集显：混合模式下关掉独显，不用重启；独显被占用时不会生效",
@@ -556,7 +596,7 @@ namespace TBMini
             for (int band = 0; band < LeftSections.Length; band++)
             {
                 var left = new List<Block>();
-                if (band == 0) { left.Add(TileBlock(_secPerf, _cardPerf, _pt)); left.Add(TileBlock(_secGpu, _cardGpu, _gt)); }
+                if (band == 0) { left.Add(TileBlock(_secPerf, _cardPerf, _perfTiles)); left.Add(TileBlock(_secGpu, _cardGpu, _gt)); }
                 var lb = SectionBlock(LeftSections[band]); if (lb != null) left.Add(lb);
                 var right = new List<Block>();
                 var rb = SectionBlock(RightSections[band]); if (rb != null) right.Add(rb);
@@ -618,13 +658,13 @@ namespace TBMini
             blocks.Count == 0 ? 0 : blocks.Sum(b => S(24) + b.CardH) + S(14) * (blocks.Count - 1);
 
         /// Places a column's blocks from y so that the last one ends at y + bandH: extra height goes into the gaps
-        /// between blocks, or, for a single feature section, into slightly taller rows (at most +50 %).
+        /// between blocks, or, for a single feature section, into taller rows (at most double height).
         void PlaceColumn(List<Block> blocks, int x, int y, int bandH, int colW)
         {
             if (blocks.Count == 0) return;
             int extra = bandH - ColumnHeight(blocks);
             int stretch = blocks.Count == 1 && blocks[0].Rows != null
-                ? Math.Min(extra, blocks[0].Rows.Count * S(RowH) / 2) : 0;
+                ? Math.Min(extra, blocks[0].Rows.Count * S(RowH)) : 0;     // up to double-height rows, so the pair ends level
             for (int i = 0; i < blocks.Count; i++)
             {
                 var b = blocks[i];
@@ -715,14 +755,14 @@ namespace TBMini
             foreach (var c in new Owner[] { _chipPower, _chipGpu, _mCpu, _mGpu, _mTotal }) c.T = _t;
             foreach (var l in new[] { _secPerf, _secGpu, _status }) { l.ForeColor = _t.Sub; l.T = _t; }
             foreach (var c in new[] { _cardPerf, _cardGpu }) c.T = _t;
-            foreach (var t in _pt.Concat(_gt)) t.T = _t;
+            foreach (var t in _perfTiles.Concat(_gt)) t.T = _t;
             foreach (var (label, card) in _sections.Values) { label.ForeColor = _t.Sub; label.T = _t; card.T = _t; }
             foreach (var r in _rows.Values)
             {
                 r.Label.ForeColor = _t.Fg; r.Label.T = _t;
                 if (r.Ctl is IThemed th) th.T = _t;
             }
-            _link.ForeColor = _t.Accent; _link.T = _t;
+            _link.ForeColor = _t.AccentFg; _link.T = _t;
             ApplyDwm();
         }
 
@@ -742,14 +782,17 @@ namespace TBMini
 
             bool busy = _app.Busy;
             var power = _app.Power;
-            bool geekOk = Its.GeekAvailable;
+            bool geekOk = Its.GeekAvailable, auto = _app.AutoPower;
             for (int i = 0; i < 4; i++)
             {
-                _pt[i].Selected = power == PowerModes[i];
+                _pt[i].Selected = power == PowerModes[i] && !auto;
+                _pt[i].Ring = power == PowerModes[i] && auto;          // the mode auto adjust is applying right now
                 _pt[i].Enabled = !busy && (PowerModes[i] != PowerMode.Geek || geekOk);
                 _pt[i].Invalidate();
             }
-            _tip.SetToolTip(_pt[3], geekOk ? T("极客：最高功耗（仅接电源）", "Geek: maximum power (AC only)") : T("极客模式只能在接电源时使用", "Geek mode is only available on AC power"));
+            _autoTile.Selected = auto; _autoTile.Enabled = !busy && Its.Supported; _autoTile.Invalidate();
+            string geekTip = geekOk ? T("极客：最高功耗（需原装大功率适配器）", "Geek: maximum power (needs the full-power adapter)") : Its.GeekUnavailableText();
+            if (geekTip != _geekTip) { _geekTip = geekTip; _tip.SetToolTip(_pt[3], geekTip); }
 
             var gi = _app.GpuInfo;
             for (int i = 0; i < 3; i++)
@@ -795,6 +838,8 @@ namespace TBMini
             string line = "";
             if (!Its.Supported) line = T("没找到联想 ITS 服务，性能模式不可用", "Lenovo ITS service not found; performance modes are unavailable");
             if (busy) line = Join(line, T("切换中…", "Switching…"));
+            // a disabled Geek tile shows no tooltip, so say why here when a slow charger is the reason
+            if (Its.GeekSupported && !geekOk && !busy && Charger.Current == ChargerKind.Slow) line = Join(line, Its.GeekUnavailableText());
             if (!Program.IsAdmin) line = Join(line, T("显卡和 BIOS 项需要管理员权限（点显卡按钮可提权）", "GPU and BIOS settings need administrator rights (click a GPU button to elevate)"));
             else if (gi.Error != null) line = Join(line, T("显卡：", "GPU: ") + gi.Error);
             else if (!gi.RunningKnown) line = Join(line, T("内屏未点亮，显卡按 BIOS 显示", "Internal display off; GPU mode shown from BIOS"));
@@ -838,7 +883,7 @@ namespace TBMini
             Show();
             Activate();
             SetForegroundWindow(Handle);
-            if (_t.Glass) Glass.ShowActive(this);
+            if (_t.Glass) { Glass.Renew(Handle, _t); Glass.ShowActive(this); }   // DWM drops the backdrop of a re-shown window
         }
 
         void AnimStep()
@@ -995,19 +1040,22 @@ namespace TBMini
         public string Glyph;
         public Color Accent = Color.SteelBlue;
         public bool Selected;
+        public bool Ring;                              // outlined in its colour: the mode auto adjust is applying
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = Prep(e);
-            Color bg = Selected ? Accent : Hover && Enabled ? T.CtlHover : T.Ctl;
-            Color fg = !Enabled && !Selected ? T.Disabled : Selected ? Theme.On(Accent) : T.Fg;
+            Color accent = T.Glass ? Theme.Vivid(Accent, T.Dark) : Accent;   // glass lowers contrast: richer colours
+            Color bg = Selected ? accent : Hover && Enabled ? T.CtlHover : T.Ctl;
+            Color fg = !Enabled && !Selected ? T.Disabled : Selected ? Theme.On(accent) : T.Fg;
             float rad = (T.Glass ? 10 : 6) * Ui;
             var box = new RectangleF(0, 0, Width, Height);
             Fill(g, box, rad, bg);
             if (Selected) Sheen(g, box, rad);
+            else if (Ring && Enabled) Stroke(g, new RectangleF(Ui, Ui, Width - 2 * Ui, Height - 2 * Ui), rad - Ui, accent, 2f * Ui);
             else Edge(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), rad);
             int gh = S(26);
-            DrawGlyph(g, Glyph, 18, new Rectangle(0, S(9), Width, gh), Selected ? fg : (Enabled ? Accent : T.Disabled));
+            DrawGlyph(g, Glyph, 18, new Rectangle(0, S(9), Width, gh), Selected ? fg : (Enabled ? accent : T.Disabled));
             // shrink long labels (e.g. English "Performance") to fit instead of cutting them off
             var font = Font;
             int avail = Width - S(8), tw = Gx.Width(Text, font);
@@ -1182,7 +1230,7 @@ namespace TBMini
             var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             Fill(g, r, r.Height / 2f, T.Card);
             Edge(g, r, r.Height / 2f);
-            DrawGlyph(g, Glyph, 13, new Rectangle(S(7), 0, S(16), Height), T.Accent);
+            DrawGlyph(g, Glyph, 13, new Rectangle(S(7), 0, S(16), Height), T.AccentFg);
             int labelEnd = S(27);
             if (ShowLabel && Label != "")
             {

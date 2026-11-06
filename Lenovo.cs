@@ -19,6 +19,51 @@ namespace TBMini
     // ---------------------------------------------------------------------------------------------
     public enum PowerMode { Unknown = -1, Auto = 0, Saver = 1, Performance = 3, Geek = 4 }
 
+    public enum ChargerKind { None, Slow, Full }
+
+    /// What powers the laptop: battery, a charger Windows reports as inadequate ("slow charger connected",
+    /// e.g. a ~100 W USB-C PD charger), or the full-power adapter. Uses Windows.System.Power.PowerManager through the
+    /// .NET Framework WinRT bridge (no extra dependency); without it every charger counts as full-power.
+    public static class Charger
+    {
+        static readonly Type Pm = Type.GetType("Windows.System.Power.PowerManager, Windows.System.Power, ContentType=WindowsRuntime", false);
+        static readonly System.Reflection.PropertyInfo Supply = Pm?.GetProperty("PowerSupplyStatus");
+
+        public static ChargerKind Current
+        {
+            get
+            {
+                if (SystemInformation.PowerStatus.PowerLineStatus != PowerLineStatus.Online) return ChargerKind.None;
+                try
+                {
+                    var v = Supply?.GetValue(null);
+                    if (v != null && Convert.ToInt32(v) == 1 /*PowerSupplyStatus.Inadequate*/) return ChargerKind.Slow;
+                }
+                catch { }
+                return ChargerKind.Full;
+            }
+        }
+
+        /// changed runs (on a thread-pool thread) when Windows reports a different power supply status. Event-driven:
+        /// nothing polls in the background.
+        public static bool Subscribe(Action changed)
+        {
+            try
+            {
+                var ev = Pm?.GetEvent("PowerSupplyStatusChanged");
+                if (ev == null) return false;
+                // WinRT events cannot be added through EventInfo.AddEventHandler; go through the runtime's WinRT helper
+                var add = (Func<EventHandler<object>, System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>)Delegate.CreateDelegate(
+                    typeof(Func<EventHandler<object>, System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>), ev.GetAddMethod());
+                var remove = (Action<System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>)Delegate.CreateDelegate(
+                    typeof(Action<System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken>), ev.GetRemoveMethod());
+                System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeMarshal.AddEventHandler(add, remove, new EventHandler<object>((s, e) => changed()));
+                return true;
+            }
+            catch { return false; }
+        }
+    }
+
     public static class Its
     {
         public const string ServiceName = "LenovoProcessManagement";
@@ -65,11 +110,18 @@ namespace TBMini
 
         public static bool OnAC => SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Online;
 
-        public static bool GeekAvailable => GeekSupported && OnAC && !GeekGreyed;
+        /// Geek needs the full-power adapter: not on battery, and not on a charger Windows calls slow (e.g. ~100 W USB-C PD).
+        public static bool GeekAvailable => GeekSupported && OnAC && !GeekGreyed && Charger.Current != ChargerKind.Slow;
+
+        public static string GeekUnavailableText() =>
+            !GeekSupported ? T("这台机器不支持极客模式", "Geek mode is not supported on this machine")
+            : Charger.Current == ChargerKind.Slow ? T("极客模式需要原装大功率适配器（当前是慢速充电器）", "Geek mode needs the full-power adapter (a slow charger is connected)")
+            : !OnAC ? T("极客模式只能在接电源时使用", "Geek mode is only available on AC power")
+            : T("联想服务暂时禁用了极客模式", "Lenovo's service has Geek mode greyed out right now");
 
         public static string Name(PowerMode m) => m switch
         {
-            PowerMode.Auto => T("智能", "Auto"),
+            PowerMode.Auto => T("智能", "Smart"),
             PowerMode.Saver => T("省电", "Saver"),
             PowerMode.Performance => T("性能", "Performance"),
             PowerMode.Geek => T("极客", "Geek"),
@@ -86,7 +138,7 @@ namespace TBMini
                 PowerMode.Geek => 0xAC,
                 _ => throw new ArgumentOutOfRangeException(nameof(m)),
             };
-            if (m == PowerMode.Geek && !GeekAvailable) throw new InvalidOperationException(T("极客模式只能在接电源时使用", "Geek mode is only available on AC power"));
+            if (m == PowerMode.Geek && !GeekAvailable) throw new InvalidOperationException(GeekUnavailableText());
 
             using (var sc = new ServiceController(ServiceName))
             {

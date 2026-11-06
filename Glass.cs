@@ -79,6 +79,19 @@ namespace TBMini
             }
         }
 
+        /// DWM drops the acrylic backdrop of a window that was hidden and shown again, and ignores setting the same
+        /// value: switch it off and back on (frame extension too) right after the window is shown.
+        public static void Renew(IntPtr hwnd, Theme t)
+        {
+            if (!Supported || !t.Glass || hwnd == IntPtr.Zero) return;
+            int none = DWMSBT_NONE, transient = DWMSBT_TRANSIENTWINDOW;
+            var zero = new Margins(); var all = new Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+            DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref none, 4);
+            DwmExtendFrameIntoClientArea(hwnd, ref zero);
+            DwmExtendFrameIntoClientArea(hwnd, ref all);
+            DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref transient, 4);
+        }
+
         /// Background of a child control: transparent on glass (the backdrop shows), plus the card tint when the
         /// control sits on a card, so it blends with the card around it.
         public static void Backdrop(Graphics g, Control c, Theme t)
@@ -218,7 +231,7 @@ namespace TBMini
                 State.Add(menu, st);
                 var state = st;
                 menu.HandleCreated += (o, e) => Glass.Apply(((Control)o).Handle, state.T, Glass.CornerRound);
-                menu.Opened += (o, e) => { if (state.T.Glass) Glass.ShowActive((Control)o); };
+                menu.Opened += (o, e) => { if (state.T.Glass) { Glass.Renew(((Control)o).Handle, state.T); Glass.ShowActive((Control)o); } };
                 Glass.KeepActiveLook(menu, () => state.T.Glass);
             }
             if (menu.IsHandleCreated) Glass.Apply(menu.Handle, t, Glass.CornerRound);
@@ -278,8 +291,8 @@ namespace TBMini
             {
                 var r = e.ImageRectangle;
                 var box = new RectangleF(r.X, 0, r.Width, e.Item.Height);
-                Gx.Glyph(e.Graphics, "", 15 * _s, box, _t.Accent, _t);                                  // CheckMark
-                Gx.Glyph(e.Graphics, "", 15 * _s, new RectangleF(box.X + 0.6f * _s, box.Y, box.Width, box.Height), _t.Accent, _t);   // drawn twice: bolder
+                Gx.Glyph(e.Graphics, "", 15 * _s, box, _t.AccentFg, _t);                                  // CheckMark
+                Gx.Glyph(e.Graphics, "", 15 * _s, new RectangleF(box.X + 0.6f * _s, box.Y, box.Width, box.Height), _t.AccentFg, _t);   // drawn twice: bolder
             }
 
             protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)

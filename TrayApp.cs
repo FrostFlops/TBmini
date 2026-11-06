@@ -71,9 +71,68 @@ namespace TBMini
             _colorDebounce = new System.Windows.Forms.Timer { Interval = 3000 };
             _colorDebounce.Tick += (s, e) => { _colorDebounce.Stop(); _ = Task.Run(() => { try { ColorPreset.Reapply(); } catch { } }); };
 
+            // Auto adjust (saver on battery / performance on a slow charger / geek on the full-power adapter):
+            // reacts to charger events only — a one-shot timer re-checks shortly after an event, nothing polls.
+            _autoPower = Registry.GetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", 0) is int ap && ap == 1;
+            _autoTimer = new System.Windows.Forms.Timer();
+            _autoTimer.Tick += (s, e) => AutoTick();
+            Charger.Subscribe(() => _ui.Post(_ => { PollPower(force: true); ScheduleAuto(1500); }, null));
+
             PollPower(force: true);
             if (_test) _ = RefreshGpuAsync();
-            else StartupAsync();
+            else
+            {
+                StartupAsync();
+                if (!Program.IsAdmin) ScheduleAuto(3000);   // elevated: StartupAsync schedules it after the boot work
+            }
+        }
+
+        // ------------------------------------------------------------------ auto adjust
+        bool _autoPower;
+        readonly System.Windows.Forms.Timer _autoTimer;
+        int _autoChecks;
+
+        internal bool AutoPower => _autoPower;
+
+        internal void SetAutoPower(bool on)
+        {
+            _autoPower = on;
+            try { Registry.SetValue(@"HKEY_CURRENT_USER\Software\TBMini", "AutoPower", on ? 1 : 0, RegistryValueKind.DWord); } catch { }
+            _panel.UpdateView();
+            if (on) ApplyAuto();
+        }
+
+        /// Checks now-ish and once more a few seconds later (a USB-C PD charger is reported as slow only after it negotiated).
+        void ScheduleAuto(int ms)
+        {
+            if (_test) return;
+            _autoChecks = 2;
+            _autoTimer.Stop(); _autoTimer.Interval = ms; _autoTimer.Start();
+        }
+
+        void AutoTick()
+        {
+            _autoTimer.Stop();
+            if (_busy) { _autoTimer.Interval = 2000; _autoTimer.Start(); return; }   // wait for the running switch, don't spend the check
+            ApplyAuto(quiet: _autoChecks > 1);                                    // only the last check may report a failure
+            if (--_autoChecks > 0) { _autoTimer.Interval = 6000; _autoTimer.Start(); }
+        }
+
+        static PowerMode AutoTarget() => Charger.Current switch
+        {
+            ChargerKind.None => PowerMode.Saver,
+            ChargerKind.Slow => PowerMode.Performance,
+            _ => Its.GeekAvailable ? PowerMode.Geek : PowerMode.Performance,
+        };
+
+        void ApplyAuto(bool quiet = false)
+        {
+            if (_test || _busy || !Its.Supported || _power == PowerMode.Unknown) return;   // no Lenovo mode service: nothing to drive
+            PowerMode target;
+            if (_autoPower) target = AutoTarget();
+            else if (_power == PowerMode.Geek && Charger.Current == ChargerKind.Slow) target = PowerMode.Performance;   // Geek is not allowed on a slow charger
+            else return;
+            if (target != _power) SetPowerCore(target, quiet);
         }
 
         // ------------------------------------------------------------------ state
@@ -97,6 +156,8 @@ namespace TBMini
             _line = line;
             if (Program.IsAdmin && (e.Mode == PowerModes.Resume || (e.Mode == PowerModes.StatusChange && acChanged)))
                 _ui.Post(_ => { if (!_busy) _ = Task.Run(() => ReconcileDgpu(5000)); }, null);
+            if (e.Mode == PowerModes.Resume || (e.Mode == PowerModes.StatusChange && acChanged))
+                _ui.Post(_ => ScheduleAuto(2500), null);   // let Lenovo's dispatcher settle first
             if (e.Mode == PowerModes.Resume)
                 _ui.Post(_ => { RestartColorDebounce(); _ = Task.Run(() => TouchpadGuard.Check(startup: true)); }, null);
         }
@@ -160,6 +221,7 @@ namespace TBMini
                 string msg = null;
                 try { msg = await Task.Run(ApplyAfterBoot); }
                 finally { _busy = false; }
+                ScheduleAuto(1500);                          // after the boot work, so the first auto check is not lost to _busy
                 if (msg != null) Balloon(msg);
                 _ = Task.Run(() => ReconcileDgpu(10000));
                 _ = Task.Run(RefreshInstalledCopy);
@@ -337,13 +399,32 @@ namespace TBMini
         internal GpuSnapshot GpuInfo => _gpu;
         internal bool Busy => _busy;
 
-        internal async void SetPower(PowerMode m)
+        PowerMode? _pendingPower;      // a user choice made while another switch was running
+
+        /// A mode picked by the user (panel, tray menu): this also turns auto adjust off.
+        internal void SetPower(PowerMode m)
         {
-            if (_busy || m == _power) return;
+            if (_autoPower) SetAutoPower(false);
+            if (_busy) { _pendingPower = m; return; }      // applied when the running switch finishes
+            SetPowerCore(m);
+        }
+
+        async void SetPowerCore(PowerMode m, bool quiet = false)
+        {
+            if (_busy || m == _power) { _panel.UpdateView(); return; }
             _busy = true; _panel.UpdateView();
             try { await Task.Run(() => Its.Set(m)); }
-            catch (Exception e) { Error(T("切换性能模式失败", "Could not switch the performance mode"), e); }
-            finally { _busy = false; PollPower(force: true); }
+            catch (Exception e) { if (!quiet) Error(T("切换性能模式失败", "Could not switch the performance mode"), e); }
+            finally { _busy = false; PollPower(force: true); RunPendingPower(); }
+        }
+
+        void RunPendingPower()
+        {
+            if (_pendingPower is PowerMode p && !_busy)
+            {
+                _pendingPower = null;
+                if (!_autoPower && p != _power) SetPowerCore(p);
+            }
         }
 
         internal async void SetGpu(GpuMode target)
@@ -428,6 +509,7 @@ namespace TBMini
             finally
             {
                 _busy = false;
+                RunPendingPower();
                 await RefreshGpuAsync();
             }
         }
@@ -581,11 +663,14 @@ namespace TBMini
             foreach (var m in new[] { PowerMode.Saver, PowerMode.Auto, PowerMode.Performance, PowerMode.Geek })
             {
                 bool geekOff = m == PowerMode.Geek && !Its.GeekAvailable;
-                var it = new ToolStripMenuItem(Its.Name(m) + (geekOff ? T("（需接电源）", " (needs AC power)") : ""))
-                { Checked = _power == m, Enabled = !_busy && !geekOff };
+                string why = geekOff ? (Charger.Current == ChargerKind.Slow ? T("（需原装大功率适配器）", " (needs the full-power adapter)") : T("（需接电源）", " (needs AC power)")) : "";
+                var it = new ToolStripMenuItem(Its.Name(m) + why) { Checked = _power == m && !_autoPower, Enabled = !_busy && !geekOff };
                 var mm = m; it.Click += (s, e) => SetPower(mm);
                 _menu.Items.Add(it);
             }
+            var adapt = new ToolStripMenuItem(T($"自动调节（当前：{Its.Name(_power)}）", $"Auto adjust (now: {Its.Name(_power)})")) { Checked = _autoPower, Enabled = !_busy && Its.Supported };
+            adapt.Click += (s, e) => SetAutoPower(!_autoPower);
+            _menu.Items.Add(adapt);
             _menu.Items.Add(new ToolStripSeparator());
             foreach (var g in new[] { GpuMode.Hybrid, GpuMode.IgpuOnly, GpuMode.Discrete })
             {
@@ -707,6 +792,7 @@ namespace TBMini
             SystemEvents.PowerModeChanged -= OnSystemPower;
             SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
             SystemEvents.SessionSwitch -= OnSessionSwitch;
+            _autoTimer.Dispose();
             _powerWatch?.Dispose();
             _guardTimer.Stop();
             _devDebounce.Stop();
