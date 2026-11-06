@@ -1169,13 +1169,13 @@ namespace TBMini
         }
 
         /// The flood for one frame: Shade's gradient (plus the glass sheen, faded in with q), opaque inside and fading to
-        /// clear over the last `feather` pixels of its edge. Premultiplied ARGB, written directly (~0.3 ms per tile).
-        /// Its edge is a circle of radius `outer` around _origin, or, for the draining tile of a transfer (wipe), a straight
-        /// front `outer` behind the exit side. The draining liquid (the tail of the stream) also turns into the new tile's
-        /// colour along the flow: a linear gradient, the new colour at the exit side and the old colour at the far side,
-        /// growing with m = 1 - q. The mix goes round the colour wheel (green -> yellow -> orange), not straight through
-        /// RGB, which would turn muddy in the middle.
-        Bitmap FloodBitmap(Color accent, Color? other, float m, float outer, float feather, float q, bool wipe)
+        /// clear over `feather` pixels at its edge. Premultiplied ARGB, written directly (~0.3 ms per tile).
+        /// Its shape is a circle of radius `outer` around _origin, or, for the draining tile of a transfer, `band`: a
+        /// rectangle with rounded corners (radius bandR) docked to the exit side. The draining liquid (the tail of the
+        /// stream) also turns into the new tile's colour along the flow: a linear gradient, the new colour at the exit
+        /// side and the old colour at the far side, growing with m = 1 - q. The mix goes round the colour wheel
+        /// (green -> yellow -> orange), not straight through RGB, which would turn muddy in the middle.
+        Bitmap FloodBitmap(Color accent, Color? other, float m, float outer, float feather, float q, RectangleF? band, float bandR)
         {
             int w = Math.Max(1, Width), h = Math.Max(1, Height);
             var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
@@ -1186,8 +1186,13 @@ namespace TBMini
                 if (_px.Length < n) _px = new int[n];
                 float ox = _origin.X, oy = _origin.Y;
                 bool axis = FlowAxis(out float ux, out float uy, out float span);
-                wipe &= axis;
                 bool mix = other.HasValue && m > 0.002f && axis;
+                // along the band's own axis when there is one, so the gradient runs straight across the tile
+                if (band.HasValue && axis)
+                {
+                    if (Math.Abs(ux) >= Math.Abs(uy)) { ux = Math.Sign(ux); uy = 0; span = w; }
+                    else { ux = 0; uy = Math.Sign(uy); span = h; }
+                }
                 const int L = 256;                                  // accent -> other, LUT[0] = accent (fine enough: no bands)
                 if (_lut.Length != L + 1) _lut = new Color[L + 1];
                 for (int i = 0; i <= L; i++) _lut[i] = mix ? Theme.HueMix(accent, other.Value, (float)i / L) : accent;
@@ -1196,6 +1201,10 @@ namespace TBMini
                 float sheenTop = T.Glass ? 70f / 255f * q : 0f, half = h / 2f;
                 float inner = outer - feather, inv = 1f / Math.Max(0.5f, feather);
                 float outer2 = outer * outer, inner2 = inner > 0 ? inner * inner : -1f, invSpan = 1f / span;
+                // band as a rounded box: centre, half size minus the corner radius
+                RectangleF bb = band ?? RectangleF.Empty;
+                float bcx = bb.X + bb.Width / 2, bcy = bb.Y + bb.Height / 2;
+                float bhx = Math.Max(0f, bb.Width / 2 - bandR), bhy = Math.Max(0f, bb.Height / 2 - bandR);
                 Color c0 = _lut[0];
                 for (int y = 0; y < h; y++)
                 {
@@ -1204,18 +1213,21 @@ namespace TBMini
                     float p = ((1 - lift) * (1 - t) + (1 - deepen) * t) * (1 - sh);
                     float qq = 255f * lift * (1 - t) * (1 - sh) + 255f * sh;
                     int solid = (255 << 24) | ((int)(c0.R * p + qq) << 16) | ((int)(c0.G * p + qq) << 8) | (int)(c0.B * p + qq);
-                    float dy = y + 0.5f - oy, dy2 = dy * dy;
+                    float py = y + 0.5f, dy = py - oy, dy2 = dy * dy;
                     int row = y * stride;
                     for (int x = 0; x < w; x++)
                     {
-                        float dx = x + 0.5f - ox;
-                        // distance behind the exit side, measured along the flow: 0 there, span at the far side
-                        float behind = axis ? Math.Max(0f, -(dx * ux + dy * uy)) : 0f;
+                        float px = x + 0.5f, dx = px - ox;
                         float a;
-                        if (wipe)
+                        if (band.HasValue)
                         {
-                            if (behind >= outer) { _px[row + x] = 0; continue; }
-                            a = Math.Min(1f, (outer - behind) * inv);
+                            // signed distance to the rounded band (negative inside); the edge sits at half alpha
+                            float qx = Math.Abs(px - bcx) - bhx, qy = Math.Abs(py - bcy) - bhy;
+                            float ex = Math.Max(qx, 0f), ey = Math.Max(qy, 0f);
+                            float sd = (float)Math.Sqrt(ex * ex + ey * ey) + Math.Min(Math.Max(qx, qy), 0f) - bandR;
+                            a = 0.5f - sd * inv;
+                            if (a <= 0f) { _px[row + x] = 0; continue; }
+                            if (a > 1f) a = 1f;
                         }
                         else
                         {
@@ -1226,6 +1238,8 @@ namespace TBMini
                         Color c = c0;
                         if (mix)
                         {
+                            // distance behind the exit side, measured along the flow: 0 there, span at the far side
+                            float behind = Math.Max(0f, -(dx * ux + dy * uy));
                             float k = m * (1f - behind * invSpan);
                             if (k > 0f) c = _lut[Math.Min(L, (int)(k * L + 0.5f))];
                         }
@@ -1334,20 +1348,21 @@ namespace TBMini
                 // the liquid: the tile's gradient inside a circle whose rim is feathered, so its front is soft, not a
                 // hard disc. The opaque core reaches the farthest corner exactly at f = 1, so the hand-over to the
                 // rest fill is seamless.
-                float feather = 20 * Ui, outer;
+                float feather = 20 * Ui, outer = 0;
                 bool hasAxis = FlowAxis(out float ux, out float uy, out float span), wipe = _wipe && hasAxis;
+                RectangleF? band = null;
+                float bandR = 0;
                 if (wipe)
                 {
-                    // the tail: everything within `outer` of the exit side, measured along the flow, behind a straight
-                    // front (perpendicular to the flow) that recedes towards the exit as it drains
-                    outer = (span + feather) * f;
-                    float mid = Math.Max(0f, outer - feather / 2), big = Width + Height;
-                    float lx = _origin.X - ux * mid, ly = _origin.Y - uy * mid, vx = -uy, vy = ux;
-                    flood.AddPolygon(new[]
-                    {
-                        new PointF(lx + vx * big, ly + vy * big), new PointF(lx - vx * big, ly - vy * big),
-                        new PointF(lx - vx * big + ux * big, ly - vy * big + uy * big), new PointF(lx + vx * big + ux * big, ly + vy * big + uy * big),
-                    });
+                    // the tail: a band with the tile's own rounded corners, docked to the exit side, that shrinks towards
+                    // it as it drains (like a smaller tile sliding out). Edge as crisp as the tile's, just softened.
+                    feather = 3 * Ui;
+                    bool horiz = Math.Abs(ux) >= Math.Abs(uy);
+                    float extent = horiz ? Width : Height, d = (extent + feather) * f;
+                    band = horiz ? (ux > 0 ? new RectangleF(Width - d, 0, d, Height) : new RectangleF(0, 0, d, Height))
+                                 : (uy > 0 ? new RectangleF(0, Height - d, Width, d) : new RectangleF(0, 0, Width, d));
+                    bandR = Math.Max(0.5f, Math.Min(rad, Math.Min(band.Value.Width, band.Value.Height) / 2));
+                    using (var bp = Draw.RoundRect(band.Value, bandR)) flood.AddPath(bp, false);
                 }
                 else
                 {
@@ -1359,7 +1374,7 @@ namespace TBMini
                 // computed per pixel into a texture that then fills the rounded tile: an exact radial alpha ramp (no
                 // banding) over the vertical gradient, and smooth tile edges, which a clip region (always aliased) would not give
                 Color? other = !_sel && _mix is Color oc ? (T.Glass ? Theme.Vivid(oc, T.Dark) : oc) : (Color?)null;
-                using var bmp = FloodBitmap(accent, other, 1 - q, outer, feather, q, wipe);
+                using var bmp = FloodBitmap(accent, other, 1 - q, outer, feather, q, band, bandR);
                 using var tb = new TextureBrush(bmp, WrapMode.Clamp);
                 g.FillPath(tb, tilePath);
             }
