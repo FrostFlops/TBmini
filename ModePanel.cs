@@ -1171,7 +1171,8 @@ namespace TBMini
         /// The flood for one frame: Shade's gradient (plus the glass sheen, faded in with q), opaque inside and fading to
         /// clear over `feather` pixels at its edge. Premultiplied ARGB, written directly (~0.3 ms per tile).
         /// Its shape is a circle of radius `outer` around _origin, or, for the draining tile of a transfer, `band`: a
-        /// rectangle with rounded corners (radius bandR) docked to the exit side. The draining liquid (the tail of the
+        /// rectangle with rounded corners (radius bandR) docked to the exit side, whose opacity also fades towards its
+        /// trailing edge by m (so it starts opaque and turns into a fading trail). The draining liquid (the tail of the
         /// stream) also turns into the new tile's colour along the flow: a linear gradient, the new colour at the exit
         /// side and the old colour at the far side, growing with m = 1 - q. The mix goes round the colour wheel
         /// (green -> yellow -> orange), not straight through RGB, which would turn muddy in the middle.
@@ -1205,6 +1206,7 @@ namespace TBMini
                 RectangleF bb = band ?? RectangleF.Empty;
                 float bcx = bb.X + bb.Width / 2, bcy = bb.Y + bb.Height / 2;
                 float bhx = Math.Max(0f, bb.Width / 2 - bandR), bhy = Math.Max(0f, bb.Height / 2 - bandR);
+                float invBand = 1f / Math.Max(1f, Math.Abs(ux) >= Math.Abs(uy) ? bb.Width : bb.Height);
                 Color c0 = _lut[0];
                 for (int y = 0; y < h; y++)
                 {
@@ -1228,6 +1230,13 @@ namespace TBMini
                             a = 0.5f - sd * inv;
                             if (a <= 0f) { _px[row + x] = 0; continue; }
                             if (a > 1f) a = 1f;
+                            // the tail fades: see-through at its trailing edge, opaque where it leaves, deepening with m
+                            if (axis)
+                            {
+                                float behindB = Math.Max(0f, -(dx * ux + dy * uy));
+                                a *= 1f - m * Math.Min(1f, behindB * invBand);
+                                if (a <= 0.002f) { _px[row + x] = 0; continue; }
+                            }
                         }
                         else
                         {
